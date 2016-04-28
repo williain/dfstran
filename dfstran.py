@@ -39,18 +39,26 @@ class dfsdisc(object):
         self.free=dfsfree()
         #TODO Truncated?
 
-    def debug_write(self):
-        print('DEBUG: Disc title:', self.title)
-        print('DEBUG: Serial number:', hex(self.serial_no))
-        print('DEBUG: Sectors:', self.sectors)
-        print('DEBUG: Boot options:', self.boot_options)
-        if self.ssd_size != self.sectors<<8:
-            print('DEBUG: Actual size:',self.ssd_size>>8, 'sectors','with '+str(self.ssd_size%256)+' extra byte(s)' if self.ssd_size%256 else '')
-        i=1
-        for file in self.cat:
-            print('DEBUG cat {}: {}'.format(i, str(file)))
-            i+=1
-    
+    def list_catalogue(self):
+        '''
+        Return a the list of filenames of the format dir.leafname.
+
+        The index number of a specific file is needed for functions like read()
+        '''
+        return list(map(lambda f:f.dir+'.'+f.name,self.cat))
+
+    def info(self, file_id):
+        '''
+        Return the info string for the specified id
+        '''
+        return str(self.cat[file_id])
+
+    def read(self, file_id):
+        '''
+        Return the file contents for the specified id
+        '''
+        pass
+
     def write_as_ssd(self, filename):
         pass #TODO
 
@@ -103,7 +111,21 @@ class ssddisc(dfsdisc):
             f.load_address=load+(load_extra<<16)
             self.cat.append(f)
 
+    def read(self, file_id):
+        self.file.seek(self.cat[file_id].start_sector<<8)
+        return self.file.read(self.cat[file_id].len)
+
+
 d=ssddisc('./Test.ssd')
 d.readcat()
-d.debug_write()
+print('DEBUG: Disc title:', d.title)
+print('DEBUG: Serial number:', hex(d.serial_no))
+print('DEBUG: Sectors:', d.sectors)
+print('DEBUG: Boot options:', d.boot_options)
+if d.ssd_size != d.sectors<<8:
+    print('DEBUG: Actual size:',d.ssd_size>>8, 'sectors','with '+str(d.ssd_size%256)+' extra byte(s)' if d.ssd_size%256 else '')
+print('DEBUG: Cat',d.list_catalogue())
+for i in range(len( d.list_catalogue() )):
+    print('DEBUG: Cat {}: {}'.format( i+1,d.info(i) ))
 
+print('DEBUG:',d.read(d.list_catalogue().index('$.!BOOT')))
