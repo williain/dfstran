@@ -20,23 +20,14 @@ class dfsfile(object):
     def __str__(self):
         return '{}.{:<7s} {} {:06X} {:06X} {:06X} bytes {:03X}'.format(self.dir, self.name, 'L' if self.loc else ' ',self.load_address, self.exec_address, self.len, self.start_sector)
 
-class dfsfree(object):
-    '''
-    dfsfree represents all the free space on a DFS disc
-    '''
-    def __init__(self):
-        self.sectors=[]
-        self.afterdisc=None
-
 class dfsdisc(object):
     def __init__(self):
         self.title=None
         self.serial_no=None
         self.sectors=None
         self.boot_options=None
-        self.ssd_size=None #TODO Do we need this if we've got a file cat and the free space?
+        self.ssd_size=None
         self.cat=[]
-        self.free=dfsfree()
         #TODO Truncated?
 
     def list_catalogue(self):
@@ -56,6 +47,31 @@ class dfsdisc(object):
     def read(self, file_id):
         '''
         Return the file contents for the specified id
+        '''
+        pass
+
+    def read_after(self, file_id):
+        '''
+        Return the remaining sector space after the specifed file id
+        '''
+        pass
+
+    def list_unused_sectors(self):
+        '''
+        Return a list of sector numbers for unused sectors
+        '''
+        pass
+
+    def read_sector(self, sector_id):
+        '''
+        Return the contents of the specified 256 byte sector
+        '''
+        pass
+
+    def read_additional(self):
+        '''
+        Return any extra data placed after the disc image finishes, or
+        the empty string if the disc is the expected size or undersized
         '''
         pass
 
@@ -115,6 +131,30 @@ class ssddisc(dfsdisc):
         self.file.seek(self.cat[file_id].start_sector<<8)
         return self.file.read(self.cat[file_id].len)
 
+    def read_after(self, file_id):
+        whole_sectors=self.cat[file_id].len>>8
+        remainder=self.cat[file_id].len % 256
+        if remainder:
+            self.file.seek((self.cat[file_id].start_sector+whole_sectors)*256+remainder)
+            return self.file.read(256-remainder)
+        else:
+            return []
+
+    def list_unused_sectors(self):
+        ordered=sorted(self.cat,key=lambda fil:fil.start_sector)
+        end=1 # End of the catalogue
+        s=[]
+        for i in range(len(ordered)):
+            s=s+list(range(end+1,ordered[i].start_sector))
+            end=ordered[i].start_sector+(ordered[i].len>>8)
+            if ordered[i].len % 256 == 0:
+                end-=1
+        s=s+list(range(end+1,self.sectors))
+        return s
+
+    def read_additional(self):
+        self.file.seek(self.sectors<<8)
+        return self.file.read()
 
 d=ssddisc('./Test.ssd')
 d.readcat()
@@ -129,3 +169,7 @@ for i in range(len( d.list_catalogue() )):
     print('DEBUG: Cat {}: {}'.format( i+1,d.info(i) ))
 
 print('DEBUG:',d.read(d.list_catalogue().index('$.!BOOT')))
+f=d.read_after(1)
+print('DEBUG len:',len(f))
+print('DEBUG unused sectors:',list( map(lambda s:hex(s),d.list_unused_sectors()) ))
+print('DEBUG additional:',d.read_additional())
