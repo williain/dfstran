@@ -28,7 +28,6 @@ class dfsdisc(object):
         self.boot_options=None
         self.ssd_size=None
         self.cat=[]
-        #TODO Truncated?
 
     def list_catalogue(self):
         '''
@@ -72,6 +71,13 @@ class dfsdisc(object):
         '''
         Return any extra data placed after the disc image finishes, or
         the empty string if the disc is the expected size or undersized
+        '''
+        pass
+
+    def read_unused_catalogue(self):
+        '''
+        Return a pair of strings representing the unused space after the
+        catalogue in sectors 0 and 1.
         '''
         pass
 
@@ -156,6 +162,14 @@ class ssddisc(dfsdisc):
         self.file.seek(self.sectors<<8)
         return self.file.read()
 
+    def read_unused_catalogue(self):
+        self.file.seek(len(self.cat)*8+8)
+        u=[self.file.read(248-len(self.cat)*8)]
+        self.file.seek(len(self.cat)*8+256+8)
+        u.append(self.file.read(248-len(self.cat)*8))
+        return u
+
+
 d=ssddisc('./Test.ssd')
 d.readcat()
 print('DEBUG: Disc title:', d.title)
@@ -173,3 +187,12 @@ f=d.read_after(1)
 print('DEBUG len:',len(f))
 print('DEBUG unused sectors:',list( map(lambda s:hex(s),d.list_unused_sectors()) ))
 print('DEBUG additional:',d.read_additional())
+u=d.read_unused_catalogue()
+if len(u[0]) != 208 or len(u[0]) != len(u[1]):
+    print('DEBUG FAIL unused catalogue len:', len(u[0]), len(u[1]))
+elif u[0][0] != 0x10 and u[0][-1] != 0x01:
+    print('DEBUG FAIL unused catalogue sector 0', u[0][0], u[0][-1])
+elif u[1][0] != 0xf0 and u[1][-1] != 0x0f:
+    print('DEBUG FAIL unused catalogue sector 1', u[1][0], u[1][-1])
+else:
+    print('DEBUG unused catalogue: OK')
