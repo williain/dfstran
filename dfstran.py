@@ -17,6 +17,7 @@ class dfsfile(object):
         self.exec_address=None
         self.len=None
         self.start_sector=None
+        self.catnum=None
 
     def read(self):
         pass
@@ -24,7 +25,7 @@ class dfsfile(object):
     def read_after(self):
         pass
 
-    def write_as_file(self, dir, catnum):
+    def write_as_file(self, dir):
         filename_inf=open(os.path.join(dir,'.{}.{}.inf'.format(self.dir,self.name)),'w')
         filename_inf.write('{}, '.format(self.name))
         filename_inf.write('L:{:06X}, '.format(self.load_address))
@@ -34,7 +35,7 @@ class dfsfile(object):
         filename_inf2=open(os.path.join(dir,'.{}.{}.inf2'.format(self.dir,self.name)),'w')
         filename_inf2.write('Start sector:{}\n'.format(self.start_sector))
         filename_inf2.write('Length:{}\n'.format(self.len))
-        filename_inf2.write('Catalogue index:{}\n'.format(catnum))
+        filename_inf2.write('Catalogue index:{}\n'.format(self.catnum))
         filename_inf2.write('After:')
         for c in self.read_after():
             filename_inf2.write('{:02x}'.format(c))
@@ -119,33 +120,52 @@ class dfsdisc(object):
         disk_inf2.close()
         after_cat=self.read_unused_catalogue()
         empty_inf=open(os.path.join(dir,'..Empty.inf'),'w')
-        empty_inf.write('After sector 0:')
+        empty_inf.write('After sector 000:')
         for c in after_cat[0]:
             empty_inf.write('{:02x}'.format(c))
         empty_inf.write('\n')
-        empty_inf.write('After sector 1:')
+        empty_inf.write('After sector 001:')
         for c in after_cat[1]:
             empty_inf.write('{:02x}'.format(c))
         empty_inf.write('\n')
         for i in self.list_unused_sectors():
-            empty_inf.write('Sector {}:'.format(i))
+            empty_inf.write('Sector {:03X}:'.format(i))
             for c in self.read_sector(i):
                 empty_inf.write('{:02x}'.format(c))
             empty_inf.write('\n')
         empty_inf.close()
-        i=0
         for fil in self.cat:
-            fil.write_as_file(dir, i)
-            i+=1
+            fil.write_as_file(dir)
 
     def write_as_adfs(self, dir):
         pass #TODO
 
 
 class ssdfile(dfsfile):
-    def __init__(self, ssddisc):
+    def __init__(self, ssddisc, catnum):
         self.ssddisc=ssddisc
         super(ssdfile, self).__init__()
+        self.readcat(catnum)
+
+    def readcat(self, catnum):
+        self.catnum=catnum
+        nameblock=self.ssddisc.read_sector(0)[catnum*8+8:catnum*8+16]
+        attribblock=self.ssddisc.read_sector(1)[catnum*8+8:catnum*8+16]
+        self.dir=chr(nameblock[-1] & 0x7f)
+        self.loc=(nameblock[-1] & 0x80) >> 7
+        self.name=nameblock[0:7].decode(encoding='Latin1').rstrip()
+        load=attribblock[0] + (attribblock[1] << 8)
+        execute=attribblock[2] + (attribblock[3] << 8)
+        self.len=attribblock[4] + (attribblock[5] << 8) + ((attribblock[6] & 0x30) << 12)
+        self.start_sector=attribblock[7] + ((attribblock[6] & 0x03) << 8)
+        exec_extra=(attribblock[6] & 0xc0) >> 6
+        if exec_extra==0x03:
+          exec_extra=0xff
+        self.exec_address=execute+(exec_extra<<16)
+        load_extra=(attribblock[6] & 0x0c) >> 2
+        if load_extra==0x03:
+          load_extra=0xff
+        self.load_address=load+(load_extra<<16)
 
     def read(self):
         return self.ssddisc.read(self.start_sector, self.len)
@@ -162,43 +182,19 @@ class ssddisc(dfsdisc):
         self.file=open(filename,'rb')
         self.readcat()
 
-    def trunc_space(self,string):
-        try:
-            return string[0:string.index(' ')]
-        except ValueError:
-            return string # No space ending found
-
     def readcat(self):
         self.file.seek(0)
         namesector=self.file.read(sectorlen)
         attribsector=self.file.read(sectorlen)
-        self.title=self.trunc_space(
-          (namesector[0:7]+attribsector[0:3]).decode()
-        )
+        self.title=(namesector[0:7]+attribsector[0:3]).decode().rstrip()
         self.serial_no=attribsector[4]
         catlen=attribsector[5]&0xfc
         self.sectors=attribsector[7]+((attribsector[6]&0x07) << 8)
         self.boot_options=attribsector[6]&0xf0 >> 4
         self.ssd_size=self.file.seek(0,2)
         self.cat=[]
-        for i in range(8,catlen+1,8):
-            f=ssdfile(self)
-            nameblock=namesector[i:i+8]
-            f.dir=chr(nameblock[-1] & 0x7f)
-            f.loc=(nameblock[-1] & 0x80) >> 7
-            f.name=self.trunc_space( nameblock[0:7].decode(encoding='Latin1') )
-            load=attribsector[i] + (attribsector[i+1] << 8)
-            execute=attribsector[i+2] + (attribsector[i+3] << 8)
-            f.len=attribsector[i+4] + (attribsector[i+5] << 8) + ((attribsector[i+6] & 0x30) << 12)
-            f.start_sector=attribsector[i+7] + ((attribsector[i+6] & 0x03) << 8)
-            exec_extra=(attribsector[i+6] & 0xc0) >> 6
-            if exec_extra==0x03:
-              exec_extra=0xff
-            f.exec_address=execute+(exec_extra<<16)
-            load_extra=(attribsector[i+6] & 0x0c) >> 2
-            if load_extra==0x03:
-              load_extra=0xff
-            f.load_address=load+(load_extra<<16)
+        for i in range(int(catlen/8)):
+            f=ssdfile(self, i)
             self.cat.append(f)
 
     def read(self, start_sector, length):
