@@ -228,31 +228,47 @@ class ssddisc(dfsdisc):
         u.append(self.file.read(sectorlen-8-len(self.cat)*8))
         return u
 
+import unittest
 
-d=ssddisc('./Test.ssd')
-print('DEBUG: Disc title:', d.title)
-print('DEBUG: Serial number:', hex(d.serial_no))
-print('DEBUG: Sectors:', d.sectors)
-print('DEBUG: Boot options:', d.boot_options)
-if d.ssd_size != d.sectors * sectorlen:
-    print('DEBUG: Actual size {} sectors {}'.format(int(d.ssd_size/sectorlen),'with {} extra byte(s)'.format(d.ssd_size % sectorlen) if d.ssd_size % sectorlen != 0 else ''))
-i=0
-for f in d.cat:
-    print('DEBUG: Cat {}: {}'.format( i+1,f.info() ))
-    i+=1
+class TestSsdDisc(unittest.TestCase):
+    def setUp(self):
+        self.d=ssddisc('./Test.ssd')
 
-f=[f for f in d.cat if f.name=='!BOOT'][0]
-print('DEBUG:',f.read())
-print('DEBUG len:',len(f.read_after()))
-print('DEBUG unused sectors:',list( map(lambda s:hex(s),d.list_unused_sectors()) ))
-print('DEBUG additional:',d.read_additional())
-u=d.read_unused_catalogue()
-if len(u[0]) != 208 or len(u[0]) != len(u[1]):
-    print('DEBUG FAIL unused catalogue len:', len(u[0]), len(u[1]))
-elif u[0][0] != 0x10 and u[0][-1] != 0x01:
-    print('DEBUG FAIL unused catalogue sector 0', u[0][0], u[0][-1])
-elif u[1][0] != 0xf0 and u[1][-1] != 0x0f:
-    print('DEBUG FAIL unused catalogue sector 1', u[1][0], u[1][-1])
-else:
-    print('DEBUG unused catalogue: OK')
-d.write_as_files('unpackd')
+    def test_disc(self):
+        self.assertEqual(self.d.title, 'TEST')
+        self.assertEqual(self.d.serial_no, 0x11)
+        self.assertEqual(self.d.sectors, 56)
+        self.assertEqual(self.d.boot_options, 0)
+        self.assertEqual(self.d.ssd_size % sectorlen, 1)
+
+    def test_file(self):
+        f=[f for f in self.d.cat if f.name=='!BOOT'][0]
+        self.assertEqual(len(f.read()), 14)
+        self.assertEqual(len(f.read_after()), 242)
+
+    def test_list_unused_sectors(self):
+        self.assertEqual(len(self.d.list_unused_sectors()),1)
+        self.assertEqual(self.d.list_unused_sectors()[0],0x28)
+
+    def test_read_additional(self):
+        self.assertEqual(len(self.d.read_additional()),1)
+        self.assertEqual(self.d.read_additional()[0],0x00)
+
+    def test_read_unused_catalogue(self):
+        u=self.d.read_unused_catalogue()
+        self.assertEqual(len(u[0]), 208)
+        self.assertEqual(len(u[1]), 208)
+        self.assertEqual(u[0][0], 0x10)
+        self.assertEqual(u[0][-1], 0x01)
+        self.assertEqual(u[1][0], 0xf0)
+        self.assertEqual(u[1][-1], 0x0f)
+
+if __name__ == '__main__':
+    d=ssddisc('./Test.ssd')
+    i=0
+    for f in d.cat:
+        print('DEBUG: Cat {}: {}'.format( i+1,f.info() ))
+        i+=1
+    if d.ssd_size != d.sectors * sectorlen:
+        print('DEBUG: Actual size {} sectors {}'.format(int(d.ssd_size/sectorlen),'with {} extra byte(s)'.format(d.ssd_size % sectorlen) if d.ssd_size % sectorlen != 0 else ''))
+    d.write_as_files('unpackd')
