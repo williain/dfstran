@@ -38,7 +38,7 @@ class dfsfile(object):
         filename_inf2.write('Catalogue index:{}\n'.format(self.catnum))
         filename_inf2.write('After:')
         for c in self.read_after():
-            filename_inf2.write('{:02x}'.format(c))
+            filename_inf2.write('{:02x}'.format(ord(c)))
         filename_inf2.close()
         filout=open(os.path.join(dir, '{}.{}'.format(self.dir, self.name)), 'wb')
         filout.write(self.read())
@@ -122,16 +122,16 @@ class dfsdisc(object):
         empty_inf=open(os.path.join(dir,'..Empty.inf'),'w')
         empty_inf.write('After sector 000:')
         for c in after_cat[0]:
-            empty_inf.write('{:02x}'.format(c))
+            empty_inf.write('{:02x}'.format(ord(c)))
         empty_inf.write('\n')
         empty_inf.write('After sector 001:')
         for c in after_cat[1]:
-            empty_inf.write('{:02x}'.format(c))
+            empty_inf.write('{:02x}'.format(ord(c)))
         empty_inf.write('\n')
         for i in self.list_unused_sectors():
             empty_inf.write('Sector {:03X}:'.format(i))
             for c in self.read_sector(i):
-                empty_inf.write('{:02x}'.format(c))
+                empty_inf.write('{:02x}'.format(ord(c)))
             empty_inf.write('\n')
         empty_inf.close()
         for fil in self.cat:
@@ -151,21 +151,21 @@ class ssdfile(dfsfile):
         self.catnum=catnum
         nameblock=self.ssddisc.read_sector(0)[catnum*8+8:catnum*8+16]
         attribblock=self.ssddisc.read_sector(1)[catnum*8+8:catnum*8+16]
-        self.dir=chr(nameblock[-1] & 0x7f)
-        self.loc=(nameblock[-1] & 0x80) >> 7
-        self.name=nameblock[0:7].decode(encoding='Latin1').rstrip()
-        load=attribblock[0] + (attribblock[1] << 8)
-        execute=attribblock[2] + (attribblock[3] << 8)
-        self.len=attribblock[4] + (attribblock[5] << 8) + ((attribblock[6] & 0x30) << 12)
-        self.start_sector=attribblock[7] + ((attribblock[6] & 0x03) << 8)
-        exec_extra=(attribblock[6] & 0xc0) >> 6
+        self.dir=chr(ord(nameblock[-1]) & 0x7f)
+        self.loc=(ord(nameblock[-1]) & 0x80) >> 7
+        self.name=nameblock[0:7].rstrip()
+        load_address=ord(attribblock[0]) + (ord(attribblock[1]) << 8)
+        exec_address=ord(attribblock[2]) + (ord(attribblock[3]) << 8)
+        self.len=ord(attribblock[4]) + (ord(attribblock[5]) << 8) + ((ord(attribblock[6]) & 0x30) << 12)
+        self.start_sector=ord(attribblock[7]) + ((ord(attribblock[6]) & 0x03) << 8)
+        exec_extra=(ord(attribblock[6]) & 0xc0) >> 6
         if exec_extra==0x03:
           exec_extra=0xff
-        self.exec_address=execute+(exec_extra<<16)
-        load_extra=(attribblock[6] & 0x0c) >> 2
+        self.exec_address=exec_address+(exec_extra<<16)
+        load_extra=(ord(attribblock[6]) & 0x0c) >> 2
         if load_extra==0x03:
           load_extra=0xff
-        self.load_address=load+(load_extra<<16)
+        self.load_address=load_address+(load_extra<<16)
 
     def read(self):
         return self.ssddisc.read(self.start_sector, self.len)
@@ -182,16 +182,20 @@ class ssddisc(dfsdisc):
         self.file=open(filename,'rb')
         self.readcat()
 
+    def __del__(self):
+        self.file.close()
+
     def readcat(self):
         self.file.seek(0)
-        namesector=self.file.read(sectorlen)
-        attribsector=self.file.read(sectorlen)
-        self.title=(namesector[0:7]+attribsector[0:3]).decode().rstrip()
-        self.serial_no=attribsector[4]
-        catlen=attribsector[5]&0xfc
-        self.sectors=attribsector[7]+((attribsector[6]&0x07) << 8)
-        self.boot_options=attribsector[6]&0xf0 >> 4
-        self.ssd_size=self.file.seek(0,2)
+        namesector=self.file.read(sectorlen).decode(encoding='Latin1')
+        attribsector=self.file.read(sectorlen).decode(encoding='Latin1')
+        self.title=(namesector[0:7]+attribsector[0:3]).rstrip()
+        self.serial_no=ord(attribsector[4])
+        catlen=ord(attribsector[5])&0xfc
+        self.sectors=ord(attribsector[7])+((ord(attribsector[6])&0x07) << 8)
+        self.boot_options=ord(attribsector[6])&0xf0 >> 4
+        self.file.seek(0,2)
+        self.ssd_size=self.file.tell()
         self.cat=[]
         for i in range(int(catlen/8)):
             f=ssdfile(self, i)
@@ -215,17 +219,21 @@ class ssddisc(dfsdisc):
 
     def read_sector(self, sector):
         self.file.seek(sector*sectorlen)
-        return self.file.read(sectorlen)
+        return self.file.read(sectorlen).decode(encoding='Latin1')
 
     def read_additional(self):
         self.file.seek(self.sectors*sectorlen)
-        return self.file.read()
+        return self.file.read().decode(encoding='Latin1')
 
     def read_unused_catalogue(self):
         self.file.seek(len(self.cat)*8+8)
-        u=[self.file.read(sectorlen-8-len(self.cat)*8)]
+        u=[self.file.read(sectorlen-8-len(self.cat)*8).decode(
+          encoding='Latin1'
+        )]
         self.file.seek(len(self.cat)*8+sectorlen+8)
-        u.append(self.file.read(sectorlen-8-len(self.cat)*8))
+        u.append(self.file.read(sectorlen-8-len(self.cat)*8).decode(
+          encoding='Latin1'
+        ))
         return u
 
 import unittest
@@ -247,21 +255,21 @@ class TestSsdDisc(unittest.TestCase):
         self.assertEqual(len(f.read_after()), 242)
 
     def test_list_unused_sectors(self):
-        self.assertEqual(len(self.d.list_unused_sectors()),1)
-        self.assertEqual(self.d.list_unused_sectors()[0],0x28)
+        self.assertEqual(len(self.d.list_unused_sectors()), 1)
+        self.assertEqual(self.d.list_unused_sectors()[0], 0x28)
 
     def test_read_additional(self):
-        self.assertEqual(len(self.d.read_additional()),1)
-        self.assertEqual(self.d.read_additional()[0],0x00)
+        self.assertEqual(len(self.d.read_additional()), 1)
+        self.assertEqual(ord(self.d.read_additional()[0]), 0x00)
 
     def test_read_unused_catalogue(self):
         u=self.d.read_unused_catalogue()
         self.assertEqual(len(u[0]), 208)
         self.assertEqual(len(u[1]), 208)
-        self.assertEqual(u[0][0], 0x10)
-        self.assertEqual(u[0][-1], 0x01)
-        self.assertEqual(u[1][0], 0xf0)
-        self.assertEqual(u[1][-1], 0x0f)
+        self.assertEqual(ord(u[0][0]), 0x10)
+        self.assertEqual(ord(u[0][-1]), 0x01)
+        self.assertEqual(ord(u[1][0]), 0xf0)
+        self.assertEqual(ord(u[1][-1]), 0x0f)
 
 if __name__ == '__main__':
     d=ssddisc('./Test.ssd')
