@@ -4,15 +4,18 @@ from __future__ import print_function
 import os
 import os.path
 
+import unittest
+
 sectorlen=2**8
 
-class dfsfile(object):
+class DfsFile(object):
     '''
-    dfsfile represents one file on a DFS disc
+    DfsFile represents one file on a DFS disc
     '''
     def __init__(self):
         self.name=None
         self.dir=None
+        self.loc=None
         self.load_address=None
         self.exec_address=None
         self.len=None
@@ -27,9 +30,9 @@ class dfsfile(object):
 
     def write_as_file(self, dir):
         filename_inf=open(os.path.join(dir,'.{}.{}.inf'.format(self.dir,self.name)),'w')
-        filename_inf.write('{}, '.format(self.name))
+        filename_inf.write('{}.{}, '.format(self.dir, self.name))
         filename_inf.write('L:{:06X}, '.format(self.load_address))
-        filename_inf.write('E:{:06X}, '.format(self.exec_address))
+        filename_inf.write('E:{:06X} '.format(self.exec_address))
         filename_inf.write('F:{}\n'.format('L' if self.loc else ''))
         filename_inf.close()
         filename_inf2=open(os.path.join(dir,'.{}.{}.inf2'.format(self.dir,self.name)),'w')
@@ -49,12 +52,47 @@ class dfsfile(object):
         Return the info line as output by a BBC Micro's *info command e.g.:
         $.FILE    L 001900 001A00 000067 02B
         '''
-        return '{}.{:<7s} {} {:06X} {:06X} {:06X} bytes {:03X}'.format(self.dir, self.name, 'L' if self.loc else ' ',self.load_address, self.exec_address, self.len, self.start_sector)
+        return '{}.{:<7s} {} {:06X} {:06X} {:06X} {:03X}'.format(self.dir, self.name, 'L' if self.loc else ' ',self.load_address, self.exec_address, self.len, self.start_sector)
 
     def __str__(self):
         return self.info()
 
-class dfsdisc(object):
+class TestDfsFile(unittest.TestCase):
+    def setUp(self):
+        self.f=DfsFile()
+        self.f.dir='T'
+        self.f.name='estfile'
+        self.f.loc=True
+        self.f.load_address=0x1000
+        self.f.exec_address=0x1100
+        self.f.len=0x1d0
+        self.f.catnum=2
+        self.f.start_sector=0x040
+        self.f.read=lambda:'Pass'.encode(encoding='Latin_1')
+        self.f.read_after=lambda:['\xde','\xad','\xbe','\xef']
+
+    def test_info(self):
+        self.assertEqual(self.f.info(),'T.estfile L 001000 001100 0001D0 040')
+
+    def test_write_as_file(self):
+        self.assertEqual(os.mkdir(os.path.join('test_data','test_out')), None)
+        try:
+            self.f.write_as_file(os.path.join('test_data','test_out'))
+            with open(os.path.join('test_data','test_out','.T.estfile.inf')) as f:
+                self.assertEqual(f.read(),'T.estfile, L:001000, E:001100 F:L\n')
+            self.assertEqual(os.unlink(os.path.join('test_data','test_out','.T.estfile.inf')), None)
+            with open(os.path.join('test_data','test_out','.T.estfile.inf2')) as f:
+                self.assertEqual(f.read(),'Start sector:64\nLength:464\nCatalogue index:2\nAfter:deadbeef')
+            self.assertEqual(os.unlink(os.path.join('test_data','test_out','.T.estfile.inf2')), None)
+            with open(os.path.join('test_data','test_out','T.estfile')) as f:
+                self.assertEqual(f.read(),'Pass')
+            self.assertEqual(os.unlink(os.path.join('test_data','test_out','T.estfile')), None)
+        finally:
+            for f in os.listdir(os.path.join('test_data','test_out')):
+                os.unlink(os.path.join('test_data','test_out',f))
+            os.rmdir(os.path.join('test_data','test_out'))
+
+class DfsDisc(object):
     def __init__(self):
         self.title=None
         self.serial_no=None
@@ -141,10 +179,10 @@ class dfsdisc(object):
         pass #TODO
 
 
-class ssdfile(dfsfile):
+class SsdFile(DfsFile):
     def __init__(self, ssddisc, catnum):
         self.ssddisc=ssddisc
-        super(ssdfile, self).__init__()
+        super(SsdFile, self).__init__()
         self.readcat(catnum)
 
     def readcat(self, catnum):
@@ -176,14 +214,15 @@ class ssdfile(dfsfile):
         sectordata=self.ssddisc.read_sector(self.start_sector+int(self.len / sectorlen))
         return sectordata[self.len % sectorlen:]
 
-class ssddisc(dfsdisc):
+class SsdDisc(DfsDisc):
     def __init__(self, filename):
-        super(ssddisc, self).__init__()
+        super(SsdDisc, self).__init__()
         self.file=open(filename,'rb')
         self.readcat()
 
     def __del__(self):
-        self.file.close()
+        if hasattr(self, 'file'):
+            self.file.close()
 
     def readcat(self):
         self.file.seek(0)
@@ -198,7 +237,7 @@ class ssddisc(dfsdisc):
         self.ssd_size=self.file.tell()
         self.cat=[]
         for i in range(int(catlen/8)):
-            f=ssdfile(self, i)
+            f=SsdFile(self, i)
             self.cat.append(f)
 
     def read(self, start_sector, length):
@@ -236,11 +275,9 @@ class ssddisc(dfsdisc):
         ))
         return u
 
-import unittest
-
 class TestSsdDisc(unittest.TestCase):
     def setUp(self):
-        self.d=ssddisc('./Test.ssd')
+        self.d=SsdDisc('./test_data/Test1.ssd')
 
     def test_disc(self):
         self.assertEqual(self.d.title, 'TEST')
@@ -272,7 +309,7 @@ class TestSsdDisc(unittest.TestCase):
         self.assertEqual(ord(u[1][-1]), 0x0f)
 
 if __name__ == '__main__':
-    d=ssddisc('./Test.ssd')
+    d=SsdDisc('./test_data/Test1.ssd')
     i=0
     for f in d.cat:
         print('DEBUG: Cat {}: {}'.format( i+1,f.info() ))
