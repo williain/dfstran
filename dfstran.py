@@ -3,6 +3,7 @@
 from __future__ import print_function
 import os
 import os.path
+import argparse
 
 import unittest
 
@@ -232,7 +233,7 @@ class SsdDisc(DfsDisc):
         self.serial_no=ord(attribsector[4])
         catlen=ord(attribsector[5])&0xfc
         self.sectors=ord(attribsector[7])+((ord(attribsector[6])&0x07) << 8)
-        self.boot_options=ord(attribsector[6])&0xf0 >> 4
+        self.boot_options=(ord(attribsector[6])&0xf0) >> 4
         self.file.seek(0,2)
         self.ssd_size=self.file.tell()
         self.cat=[]
@@ -275,6 +276,69 @@ class SsdDisc(DfsDisc):
         ))
         return u
 
+    def output_bin(self, heading, data):
+        r=heading+' '*(len(heading) % 5 + 1)
+        while len(data)>1:
+            r+='{:02x}{:02x} '.format(ord(data[0]),ord(data[1]))
+            data=data[2:]
+        if len(data)==1:
+            r+='{:02x}'.format(ord(data[0]))
+        return r
+
+    def info(self, verbose):
+        if verbose:
+            r='Title: {}\nSerial no:{}\n'
+        else:
+            r='{} ({})\n'
+        r=r.format(self.title,self.serial_no)
+        if verbose:
+            l=self.sectors*sectorlen/1024
+            r+='Total sectors:0x{:03x} ({}K)\n'.format(
+              self.sectors, l if int(l) != l else int(l)
+            )
+        if verbose>1:
+            if self.ssd_size != self.sectors * sectorlen:
+                r+='INFO: Actual size 0x{:03x} sectors{}\n'.format(
+                  int(self.ssd_size/sectorlen),
+                  ' with {} extra byte(s)'.format(self.ssd_size % sectorlen)
+                    if self.ssd_size % sectorlen != 0 else ''
+                )
+        opt4=['off','LOAD','RUN','EXEC']+['invalid']*12
+        r+='Option {} ({})\n'.format(
+          self.boot_options, opt4[self.boot_options]
+        )
+        cat=self.cat
+        if not verbose:
+            cat=sorted(cat,key=lambda fil:fil.dir+'.'+fil.name)
+        i=0
+        for f in cat:
+            if verbose:
+                r+='File {}: {}\n'.format( i+1,f.info() )
+                if verbose>1:
+                    r+=self.output_bin('Additional data: ', f.read_after())+'\n'
+            else:
+                r+=f.info()+'\n'
+            i+=1
+        if verbose>2:
+            u=self.read_unused_catalogue()
+            r+=self.output_bin('Unused in sector 0: ', u[0])+'\n'
+            r+=self.output_bin('Unused in sector 1: ' ,u[1])+'\n'
+        if verbose>1:
+            u=self.list_unused_sectors()
+            if len(u)==0:
+                r+='All sectors are in use'
+            else:
+                r+='Unused sectors:'
+                for s in u:
+                    if verbose>2:
+                        r+=self.output_bin(
+                          '\n- Sector 0x{:03x}: '.format(s),
+                          self.read_sector(s)
+                        )
+                    else:
+                        r+='0x{:03x} '.format(s)
+        return r
+
 class TestSsdDisc(unittest.TestCase):
     def setUp(self):
         self.d=SsdDisc('./test_data/Test1.ssd')
@@ -309,11 +373,28 @@ class TestSsdDisc(unittest.TestCase):
         self.assertEqual(ord(u[1][-1]), 0x0f)
 
 if __name__ == '__main__':
-    d=SsdDisc('./test_data/Test1.ssd')
-    i=0
-    for f in d.cat:
-        print('DEBUG: Cat {}: {}'.format( i+1,f.info() ))
-        i+=1
-    if d.ssd_size != d.sectors * sectorlen:
-        print('DEBUG: Actual size {} sectors {}'.format(int(d.ssd_size/sectorlen),'with {} extra byte(s)'.format(d.ssd_size % sectorlen) if d.ssd_size % sectorlen != 0 else ''))
-    d.write_as_files('unpackd')
+    pars=argparse.ArgumentParser(prog='dfstran', description='pack and unpack BBC Micro DFS disc images')
+    pars.add_argument('--verbose', '-v', action='count', help='Report more details of the input')
+    pars.add_argument('input', help='The ssd file or directory to be processed')
+    pars.add_argument('output', nargs='?', help='The target file or folder for the input to be converted into')
+    pars.add_argument('--cat', '-c', action='store_true', help='List the contents of the input; do not convert')
+    args=pars.parse_args()
+    if not os.path.exists(args.input):
+        print("ERROR: Input '{}' doesn't exist".format(args.input))
+        exit(2)
+    else:
+        d=SsdDisc(args.input)
+
+    verbose=args.verbose
+    if verbose==None:
+        verbose=0
+    if args.cat:
+        if args.output!=None:
+            print('WARNING: Output given with --cat option; not converting')
+        print(d.info(verbose))
+    else:
+        if args.output==None:
+            print('INFO: No output given; cataloging input')
+        print(d.info(verbose))
+        if args.output!=None:
+            d.write_as_files(args.output)
