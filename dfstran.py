@@ -277,7 +277,9 @@ class SsdDisc(DfsDisc):
         return u
 
     def output_bin(self, heading, data):
-        r=heading+' '*(len(heading) % 5 + 1)
+        r=heading+' '*((0-len(heading.split('\n')[-1])) % 5)
+        if len(data)==0:
+            r+='None'
         while len(data)>1:
             r+='{:02x}{:02x} '.format(ord(data[0]),ord(data[1]))
             data=data[2:]
@@ -292,14 +294,14 @@ class SsdDisc(DfsDisc):
             r='{} ({})\n'
         r=r.format(self.title,self.serial_no)
         if verbose:
-            l=self.sectors*sectorlen/1024
+            k=self.sectors*sectorlen/1024
             r+='Total sectors:0x{:03x} ({}K)\n'.format(
-              self.sectors, l if int(l) != l else int(l)
+              self.sectors, int(k) if int(k) == k else k # Tidy py3 fractions
             )
         if verbose>1:
             if self.ssd_size != self.sectors * sectorlen:
                 r+='INFO: Actual size 0x{:03x} sectors{}\n'.format(
-                  int(self.ssd_size/sectorlen),
+                  self.ssd_size//sectorlen,
                   ' with {} extra byte(s)'.format(self.ssd_size % sectorlen)
                     if self.ssd_size % sectorlen != 0 else ''
                 )
@@ -313,16 +315,22 @@ class SsdDisc(DfsDisc):
         i=0
         for f in cat:
             if verbose:
-                r+='File {}: {}\n'.format( i+1,f.info() )
-                if verbose>1:
+                r+='File {}: {}{}\n'.format(
+                  i+1, f.info(),
+                  ' cropped!'
+                    if f.start_sector*sectorlen+f.len > self.ssd_size
+                    else
+                  ''
+                )
+                if verbose>2:
                     r+=self.output_bin('Additional data: ', f.read_after())+'\n'
             else:
                 r+=f.info()+'\n'
             i+=1
         if verbose>2:
             u=self.read_unused_catalogue()
-            r+=self.output_bin('Unused in sector 0: ', u[0])+'\n'
-            r+=self.output_bin('Unused in sector 1: ' ,u[1])+'\n'
+            r+=self.output_bin('Unused in sector 0x000: ', u[0])+'\n'
+            r+=self.output_bin('Unused in sector 0x001: ' ,u[1])+'\n'
         if verbose>1:
             u=self.list_unused_sectors()
             if len(u)==0:
@@ -330,6 +338,8 @@ class SsdDisc(DfsDisc):
             else:
                 r+='Unused sectors:'
                 for s in u:
+                    if (s*sectorlen) >= self.ssd_size:
+                        break
                     if verbose>2:
                         r+=self.output_bin(
                           '\n- Sector 0x{:03x}: '.format(s),
@@ -337,6 +347,22 @@ class SsdDisc(DfsDisc):
                         )
                     else:
                         r+='0x{:03x} '.format(s)
+                if self.sectors > self.ssd_size//sectorlen:
+                    r+='\nSector'
+                    if self.ssd_size//sectorlen+1 >= self.sectors:
+                        r+=' 0x{:03x} cropped'.format(self.sectors)
+                    else:
+                        r+='s 0x{:03x}-0x{:03x} cropped'.format(
+                          -(-self.ssd_size//sectorlen),
+                          self.sectors
+                        )
+                r+='\n'
+        if verbose>2:
+            a=self.read_additional()
+            if a:
+                r+=self.output_bin('Data after disc image: ',a)+'\n'
+            else:
+                r+='No data after disc image\n'
         return r
 
 class TestSsdDisc(unittest.TestCase):
@@ -347,7 +373,7 @@ class TestSsdDisc(unittest.TestCase):
         self.assertEqual(self.d.title, 'TEST')
         self.assertEqual(self.d.serial_no, 0x11)
         self.assertEqual(self.d.sectors, 56)
-        self.assertEqual(self.d.boot_options, 0)
+        self.assertEqual(self.d.boot_options, 3)
         self.assertEqual(self.d.ssd_size % sectorlen, 1)
 
     def test_file(self):
@@ -391,10 +417,16 @@ if __name__ == '__main__':
     if args.cat:
         if args.output!=None:
             print('WARNING: Output given with --cat option; not converting')
-        print(d.info(verbose))
+        print(d.info(verbose), end='')
     else:
         if args.output==None:
             print('INFO: No output given; cataloging input')
-        print(d.info(verbose))
+            print(d.info(verbose), end='')
         if args.output!=None:
+            if verbose>1:
+                print(d.info(verbose-2), end='')
             d.write_as_files(args.output)
+            if verbose:
+                print('INFO: {} unpacked to {}'.format(
+                  args.input, args.output
+                ))
