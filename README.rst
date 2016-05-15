@@ -34,6 +34,7 @@ Running tests
 You might want to test this software before you run it, for example if
 you're running it on an untested platform.  You'll need the full repository
 to give you the test_data folder. To run the built-in tests, run::
+
     python -m unittest dfstran
 
 Provided the output ends with 'OK' the tests have passed.
@@ -43,9 +44,11 @@ How to use it
 
 To unpack a BBC Micro ssd disc image, call dfstran with the ssd file
 and a non-existant directory to unpack to, for example::
+
     ./dfstran input.ssd out_dir
 
 To print details of an ssd file (to catalogue it)::
+
     ./dfstran -c input.ssd
 
 Without any '-v' flags, the output when cataloguing is equivalent to that
