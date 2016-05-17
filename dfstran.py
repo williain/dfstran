@@ -37,7 +37,7 @@ class DfsFile(object):
         filename_inf.write('F:{}\n'.format('L' if self.loc else ''))
         filename_inf.close()
         filename_inf2=open(os.path.join(dir,'.{}.{}.inf2'.format(self.dir,self.name)),'w')
-        filename_inf2.write('Start sector:{}\n'.format(self.start_sector))
+        filename_inf2.write('Start sector:{:03x}\n'.format(self.start_sector))
         filename_inf2.write('Length:{}\n'.format(self.len))
         filename_inf2.write('Catalogue index:{}\n'.format(self.catnum))
         filename_inf2.write('After:')
@@ -83,7 +83,7 @@ class TestDfsFile(unittest.TestCase):
                 self.assertEqual(f.read(),'T.estfile, L:001000, E:001100 F:L\n')
             self.assertEqual(os.unlink(os.path.join('test_data','test_out','.T.estfile.inf')), None)
             with open(os.path.join('test_data','test_out','.T.estfile.inf2')) as f:
-                self.assertEqual(f.read(),'Start sector:64\nLength:464\nCatalogue index:2\nAfter:deadbeef')
+                self.assertEqual(f.read(),'Start sector:040\nLength:464\nCatalogue index:2\nAfter:deadbeef')
             self.assertEqual(os.unlink(os.path.join('test_data','test_out','.T.estfile.inf2')), None)
             with open(os.path.join('test_data','test_out','T.estfile')) as f:
                 self.assertEqual(f.read(),'Pass')
@@ -153,7 +153,7 @@ class DfsDisc(object):
         disk_inf.write('T: {}, S: {}\n'.format(self.title, self.serial_no))
         disk_inf.close()
         disk_inf2=open(os.path.join(dir,'..THIS_DISK.inf2'),'w')
-        disk_inf2.write('Sectors:{}, '.format(self.sectors))
+        disk_inf2.write('Sectors:{:03x}, '.format(self.sectors))
         disk_inf2.write('SSD file size:{}, '.format(self.ssd_size))
         disk_inf2.write('Catalogue len:{}\n'.format(len(self.cat)))
         disk_inf2.close()
@@ -178,7 +178,6 @@ class DfsDisc(object):
 
     def write_as_adfs(self, dir):
         pass #TODO
-
 
 class SsdFile(DfsFile):
     def __init__(self, ssddisc, catnum):
@@ -397,6 +396,191 @@ class TestSsdDisc(unittest.TestCase):
         self.assertEqual(ord(u[0][-1]), 0x01)
         self.assertEqual(ord(u[1][0]), 0xf0)
         self.assertEqual(ord(u[1][-1]), 0x0f)
+
+class ParseUtils(object):
+    def __init__(self,directory,verbose):
+        self.dir=directory
+        self.verbose=verbose
+
+    def hex2int(self, number):
+        try:
+            return int(number,16)
+        except ValueError:
+            if self.verbose:
+                print('Warning: Not a hex number: {}'.format(number))
+            return 0
+
+    def str2int(self, string):
+        try:
+            return int(string)
+        except ValueError:
+            if self.verbose:
+                print('Warning: Not a decimal number: {}'.format(string))
+            return 0
+
+    def line(self,line,keys,filename):
+        for arg in line.split(','):
+            try:
+                parm=arg[:arg.index(':')].strip()
+                value=arg[arg.index(':')+1:].strip()
+                if parm in keys.keys():
+                    keys[parm](value)
+                else:
+                    if self.verbose:
+                        print("Warning: Unrecognised parameter '{}' "+
+                          "in {}".format(parm, filename)
+                        )
+            except ValueError:
+                if self.verbose:
+                    print("Warning: Malformed line '{}' in {}".format(
+                      line, filename
+                    ))
+
+    def file(self, keys, filename):
+        with open(os.path.join(self.dir,filename),'r') as handle:
+            for l in handle.readlines():
+                self.line(l.rstrip('\n'), keys, filename)
+
+class DirFile(DfsFile):
+    def __init__(self, directory, filename, verbose):
+        super(DfsFile, self).__init__()
+        self.dir=directory
+        self.filename=filename
+        self.verbose=verbose
+        self.parse_file()
+
+    def parse_file(self):
+        parse=ParseUtils(self.dir, self.verbose)
+        with open(os.path.join(self.dir,'.'+self.filename+'.inf'),'r') as f:
+            for line in f.readlines():
+                line=line.rstrip('\n').lstrip()
+                i=0
+                for arg in line.split(' '):
+                    i+=1
+                    try:
+                        (parm, value)=arg.split(':')
+                        parm=parm.strip()
+                        value=value.strip()
+                        if parm.startswith(','):
+                            parm=parm[1:].strip()
+                        if value.endswith(','):
+                            value=value[:-1].strip()
+
+                        if parm=='L:':
+                            self.load_address=parse.hex2int(value)
+                        if parm=='E:':
+                            self.exec_address=parse.hex2int(value)
+                        if parm=='F:':
+                            self.loc=(value.strip()=='L')
+                    except ValueError:
+                        if i>1:
+                            print(
+                              "Warning: Unrecognised argument",
+                              "'{}' in {}".format(arg, '.'+self.filename+'.inf'
+                              )
+                            )
+                        # if i==1, first arg is allowed to not contain
+                        # a colon, since it's expected to be the filename
+
+        def Start(value): self.start_sector=parse.hex2int(value)
+        def Len(value): self.len=parse.str2int(value)
+        def Index(value): self.catnum=parse.str2int(value)
+        def After(value): pass #TODO
+        parse.file(
+          {
+          'Start sector':Start, 'Length':Len,
+          'Catalogue index':Index, 'After':After
+          }, '.'+self.filename+'.inf2'
+        )
+
+    def read(self):
+        pass #TODO
+
+    def read_after(self):
+        pass #TODO
+
+class DirDisc(DfsDisc):
+    def __init__(self, directory, verbose):
+        super(DirDisc, self).__init__()
+        self.dir=directory
+        self.verbose=verbose
+        self.parse_dir()
+
+    def parse_dir(self):
+        parse=ParseUtils(self.dir,self.verbose)
+        with open(os.path.join(self.dir, '..THIS_DISK.inf'),'r') as f:
+            for line in f.readlines():
+                if line.startswith('*OPT4,'):
+                    self.boot_options=int(line[len('*OPT4,'):])
+                else:
+                    def T(value): self.title=value
+                    def S(value): self.serial_no=parse.str2int(value)
+                    parse.line(
+                      line, {'T': T, 'S': S},
+                      '..THIS_DISC.inf'
+                    )
+
+
+        def Sec(value): self.sectors=parse.hex2int(value)
+        def Size(value): self.ssd_size=parse.str2int(value)
+        def Noop(value): pass #TODO
+        parse.file(
+          {'Sectors':Sec, 'SSD file size':Size, 'Catalogue len':Noop},
+          '..THIS_DISK.inf2'
+        )
+
+        cat=[]
+        for filename in os.listdir(self.dir):
+            if len(filename)!=0:
+                if filename[0] != '.':
+                    f=DirFile(self.dir, filename, self.verbose)
+                    cat.append(f)
+
+        with open(os.path.join(self.dir, '..Empty.inf'),'r') as f:
+            for line in f.readlines():
+                if line.startswith('Sector '):
+                    sector=int('0x'+line[len('Sector '):])
+                    pass # TODO
+                else:
+                    parse.line(
+                      line,
+                      {'After sector 000': Noop, 'After sector 001': Noop},
+                      '..Empty.inf'
+                    )
+
+    def read(self, start_sector, length):
+        pass
+
+    def list_unused_sectors(self):
+        pass
+
+    def read_sector(self, sector):
+        pass
+
+    def read_additional(self):
+        pass
+
+    def read_unused_catalogue(self):
+        pass
+
+class TestDirDisc(unittest.TestCase):
+    def setUp(self):
+        self.f=DirDisc(os.path.join('test_data','DirTest1'),1)
+
+    def test_boot_opts(self):
+        self.assertEqual(self.f.boot_options, 3)
+
+    def test_title(self):
+        self.assertEqual(self.f.title, 'DIRTEST1')
+
+    def test_serialno(self):
+        self.assertEqual(self.f.serial_no, 255)
+
+    def test_sectors(self):
+        self.assertEqual(self.f.sectors, 5)
+
+    def test_ssd_size(self):
+        self.assertEqual(self.f.ssd_size, 1280)
 
 if __name__ == '__main__':
     pars=argparse.ArgumentParser(prog='dfstran', description='pack and unpack BBC Micro DFS disc images')
