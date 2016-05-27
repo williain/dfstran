@@ -17,10 +17,11 @@ class DfsFile(object):
         self.name=None
         self.dir=None
         self.loc=None
-        self.load_address=None
-        self.exec_address=None
+        self.load_address=0x001900
+        self.exec_address=0x001900
+        self.loc=False
+        self.start_sector=2
         self.len=None
-        self.start_sector=None
         self.catnum=None
 
     def read(self):
@@ -101,6 +102,7 @@ class DfsDisc(object):
         self.boot_options=None
         self.ssd_size=None
         self.cat=[]
+        self.additional=None
 
     def list_catalogue(self):
         '''
@@ -127,7 +129,7 @@ class DfsDisc(object):
         Return any extra data placed after the disc image finishes, or
         the empty string if the disc is the expected size or undersized
         '''
-        pass
+        return self.additional
 
     def read_unused_catalogue(self):
         '''
@@ -172,6 +174,10 @@ class DfsDisc(object):
             for c in self.read_sector(i):
                 empty_inf.write('{:02x}'.format(ord(c)))
             empty_inf.write('\n')
+        empty_inf.write('After disc image:')
+        for c in self.read_additional():
+            empty_inf.write('{:02x}'.format(ord(c)))
+        empty_inf.write('\n')
         empty_inf.close()
         for fil in self.cat:
             fil.write_as_file(dir)
@@ -418,6 +424,17 @@ class ParseUtils(object):
                 print('Warning: Not a decimal number: {}'.format(string))
             return 0
 
+    def text2bin(self, value, message):
+        data=[]
+        while len(value)>=2:
+            data.append(self.hex2int(value[0:2]))
+            value=value[2:]
+        if len(value)==1:
+            if self.verbose:
+                print(message, 'has odd length; wiping last byte')
+            data.append(0)
+        return data
+
     def line(self,line,keys,filename):
         for arg in line.split(','):
             try:
@@ -442,62 +459,372 @@ class ParseUtils(object):
                 self.line(l.rstrip('\n'), keys, filename)
 
 class DirFile(DfsFile):
-    def __init__(self, directory, filename, verbose):
-        super(DfsFile, self).__init__()
+    def __init__(self, directory, filename, get_sector, set_sector, verbose):
+        super(DirFile, self).__init__()
         self.dir=directory
         self.filename=filename
         self.verbose=verbose
+        self.after=[]
+        self.get_sector=get_sector
+        self.set_sector=set_sector
         self.parse_file()
 
     def parse_file(self):
         parse=ParseUtils(self.dir, self.verbose)
-        with open(os.path.join(self.dir,'.'+self.filename+'.inf'),'r') as f:
-            for line in f.readlines():
-                line=line.rstrip('\n').lstrip()
-                i=0
-                for arg in line.split(' '):
-                    i+=1
-                    try:
-                        (parm, value)=arg.split(':')
-                        parm=parm.strip()
-                        value=value.strip()
-                        if parm.startswith(','):
-                            parm=parm[1:].strip()
-                        if value.endswith(','):
-                            value=value[:-1].strip()
+        # Set default values for new files
+        with open(os.path.join(self.dir,self.filename),'r') as handle:
+            handle.seek(0,2)
+            self.len=handle.tell()
+        self.after=[0]*(sectorlen-(self.len-1)%sectorlen-1)
+        self.conflicting=True
+        # Parse inf files
+        inf_filename=os.path.join(self.dir,'.'+self.filename+'.inf')
+        if os.path.isfile(inf_filename):
+            with open(inf_filename,'r') as f:
+                for line in f.readlines():
+                    line=line.rstrip('\n').lstrip()
+                    i=0
+                    for arg in line.split(' '):
+                        i+=1
+                        try:
+                            (parm, value)=arg.split(':')
+                            parm=parm.strip()
+                            value=value.strip()
+                            parm=parm.lstrip(', ')
+                            value=value.rstrip(', ')
 
-                        if parm=='L:':
-                            self.load_address=parse.hex2int(value)
-                        if parm=='E:':
-                            self.exec_address=parse.hex2int(value)
-                        if parm=='F:':
-                            self.loc=(value.strip()=='L')
-                    except ValueError:
-                        if i>1:
-                            print(
-                              "Warning: Unrecognised argument",
-                              "'{}' in {}".format(arg, '.'+self.filename+'.inf'
-                              )
-                            )
-                        # if i==1, first arg is allowed to not contain
-                        # a colon, since it's expected to be the filename
+                            if parm=='L': self.load_address=parse.hex2int(value)
+                            if parm=='E': self.exec_address=parse.hex2int(value)
+                            if parm=='F': self.loc=(value.strip()=='L')
+                        except ValueError:
+                            if i>1 and self.verbose:
+                                print(
+                                  "Warning: Unrecognised argument",
+                                  "'{}' in {}".format(
+                                    arg,
+                                    '.'+self.filename+'.inf'
+                                  )
+                                )
+                            # if i==1, first arg is allowed to not contain
+                            # a colon, since it's expected to be the filename
 
-        def Start(value): self.start_sector=parse.hex2int(value)
-        def Len(value): self.len=parse.str2int(value)
-        def Index(value): self.catnum=parse.str2int(value)
-        def After(value): pass #TODO
-        parse.file(
-          {
-          'Start sector':Start, 'Length':Len,
-          'Catalogue index':Index, 'After':After
-          }, '.'+self.filename+'.inf2'
-        )
+        if os.path.isfile(inf_filename+'2'):
+            def Start(value): self.start_sector=parse.hex2int(value)
+            def Len(value): self.len=parse.str2int(value)
+            def Index(value): self.catnum=parse.str2int(value)
+            def After(value):
+                self.after=[]
+                while len(value)>=2:
+                    self.after.append(parse.hex2int(value[0:2]))
+                    value=value[2:]
+                if len(value)==1:
+                    if self.verbose:
+                        print('Warning: After for {} has odd length;'.format(
+                          self.filename
+                        ), 'wiping last byte'
+                        )
+                    self.after.append(0)
+            parse.file(
+              {
+              'Start sector':Start, 'Length':Len,
+              'Catalogue index':Index, 'After':After
+              }, '.'+self.filename+'.inf2'
+            )
+            self.conflicting=False # Reset flag
+
+    def fit_file(self):
+        with open(os.path.join(self.dir, self.filename),'r') as handle:
+            handle.seek(0,2)
+            length=handle.tell()
+
+        orig_last_sector=self.start_sector+(self.len-1)//sectorlen
+        diff_len=False
+        if length!=self.len:
+            if self.verbose:
+                print('Info: File {} length has changed;'.format(
+                  self.filename
+                ),
+                  'is {} bytes was {} bytes'.format(
+                     length, self.len
+                  )
+                )
+            self.len=length
+            diff_len=True
+        last_sector=self.start_sector+(self.len-1)//sectorlen
+
+        if not self.conflicting:
+            if last_sector > orig_last_sector:
+                # Check sectors for conflicts
+                for s in range(orig_last_sector+1,last_sector):
+                    if self.get_sector(s) == None:
+                        self.conflicting=True
+                        break
+                if not self.conflicting:
+                    last_sector_data=self.get_sector(last_sector)
+                    if last_sector_data != None:
+                        # File fits; calculate after based on existing data
+                        self.after=last_sector_data[(self.len-1)%sectorlen+1:]
+                    else:
+                        self.conflicting=True
+                if self.conflicting:
+                    # Mark previously full sectors as empty
+                    for s in range(self.start_sector, orig_last_sector):
+                        self.set_sector(s,[0]*256)
+                    # Store self.after in old location
+                    self.set_sector(
+                      orig_last_sector,
+                      [0]*(sectorlen-len(self.after))+self.after
+                    )
+                    if self.verbose>=2:
+                        print('Info: File {} has grown beyond allotted'.format(
+                          self.filename
+                        ), 'space; will be moved')
+                else:
+                    # Claim expanded sectors as used
+                    for s in range(orig_last_sector+1, last_sector+1):
+                        self.set_sector(s, None)
+                    if self.verbose>=2:
+                        print('Info: File {} has grown to take {} extra'.format(
+                          self.filename, last_sector-orig_last_sector
+                        ), 'disc sectors, but it fits')
+            elif last_sector < orig_last_sector:
+                for s in range(last_sector+1,orig_last_sector):
+                    self.set_sector(s,[0]*sectorlen)
+                self.set_sector(
+                  orig_last_sector,
+                  [0]*(sectorlen-len(self.after))+self.after
+                )
+                if self.verbose>=2:
+                    print('Info: File {} has shrunk, freeing up {}'.format(
+                      self.filename, orig_last_sector, last_sector
+                    ), 'sectors')
+                self.after=[0]*(sectorlen-(self.len-1)%sectorlen-1)
+            else:
+                # Still ends in same sector
+                last_sector_len=(self.len-1)%sectorlen+1+len(self.after)
+                if last_sector_len != sectorlen:
+                    # File len has changed; self.after needs tweaking
+                    if self.verbose and not diff_len:
+                        print("Warning: 'Bytes after' record corrupted",
+                          "for {}".format(self.filename)
+                        )
+                    elif self.verbose>=2:
+                        print('Info: File {} length changed, but still'.format(
+                          self.filename
+                        ), 'fits in the same allocated sectors')
+
+                if last_sector_len>sectorlen:
+                    self.after=self.after[last_sector_len-sectorlen:]
+                else:
+                    self.after=[0]*(sectorlen-last_sector_len)+self.after
 
     def read(self):
-        pass #TODO
+        with open(os.path.join(self.dir,self.filename),'r') as handle:
+            return handle.read()
 
     def read_after(self):
-        pass #TODO
+        return list(self.after) # Modifyable copy of self.after
+
+    def get_cat_data(self):
+        '''
+        Get the 8 bytes of data that go into sector 0 for every file on a disc
+        '''
+        block=[' ']*7
+        dirflag=ord(self.dir[0])
+        if self.loc:
+            dirflag=dirflag | 0x80
+        block.append(dirflag)
+        return block
+
+    def get_attrib_data(self):
+        '''
+        Get the 8 bytes of data that go into sector 1 for every file on a disc
+        '''
+        block=[
+          (self.load_address & 0x00ff00) >> 8,
+          self.load_address & 0x0000ff
+        ]
+        block.append((self.exec_address & 0x00ff00) >> 8)
+        block.append(self.exec_address & 0x0000ff)
+        block.append((self.len & 0x00ff00) >> 8)
+        block.append(self.len & 0x0000ff)
+        block.append(
+          ((self.exec_address & 0x030000) >> 10) + # 0b11000000
+          ((self.len & 0x030000) >> 12) +  # 0b001100000
+          ((self.load_address & 0x030000) >> 14) + # 0b00001100
+          ((self.start_sector & 0x0300) >> 8) # 0b00000011
+        )
+        block.append(self.start_sector & 0x0000ff)
+        return block
+
+    def is_conflicting(self):
+        return self.conflicting
+
+    def move(self, new_start_sector):
+        self.start_sector=new_start_sector
+        lastsector=new_start_sector+self.len//sectorlen
+        try:
+            for s in range(new_start_sector, lastsector):
+                self.get_sector(s)[0]
+            self.after=self.get_sector(lastsector)[(self.len-1)%sectorlen+1:]
+        except TypeError:
+            raise RuntimeError('Trying to move to occupied space!')
+
+class TestDirFile(unittest.TestCase):
+    def setUp(self):
+        def get_sector(sector): return [0]*sectorlen
+        def set_sector(sector,data): pass
+        self.f=DirFile(
+          os.path.join('test_data','DirTest1'),
+          '$.FILE1',
+          get_sector,set_sector,
+          1
+        )
+        self.get_s=get_sector
+        self.set_s=set_sector
+        def error_sector(*args): self.assertTrue(False,'error_sector({}) called'.format(','.join([str(a) for a in args])))
+        self.error_sector=error_sector
+
+    def make_dirfile(self, filename, get_s, set_s, verbose):
+        return DirFile(
+          os.path.join('test_data','DirFileTest'),
+          filename,
+          get_s,
+          set_s,
+          verbose
+        )
+
+    def test_filename(self):
+        self.assertEqual(self.f.filename, '$.FILE1')
+
+    def test_load_address(self):
+        self.assertEqual(self.f.load_address, 0xFF1900)
+        newfile=self.make_dirfile('NEWFILE', self.get_s, self.set_s, 0)
+        self.assertEqual(newfile.load_address,0x1900)
+
+    def test_exec_address(self):
+        self.assertEqual(self.f.exec_address, 0xFF8023)
+        newfile=self.make_dirfile('NEWFILE', self.get_s, self.set_s, 0)
+        self.assertEqual(newfile.exec_address,0x1900)
+
+    def test_start_sector(self):
+        self.assertEqual(self.f.start_sector, 0x003)
+        newfile=self.make_dirfile('NEWFILE', self.get_s, self.set_s, 0)
+        self.assertEqual(newfile.start_sector,2)
+
+    def test_len(self):
+        self.assertEqual(self.f.len, 270)
+
+    def test_catnum(self):
+        self.assertEqual(self.f.catnum, 0)
+        newfile=self.make_dirfile('NEWFILE', self.get_s, self.set_s, 0)
+        self.assertEqual(newfile.catnum,None)
+        growaligned=self.make_dirfile('GROWALIGNED', self.get_s, self.set_s, 0)
+        self.assertEqual(growaligned.catnum, 2)
+
+    def test_read(self):
+        self.assertEqual(len(self.f.read()), self.f.len)
+        newfile=self.make_dirfile('NEWFILE', self.get_s, self.set_s, 0)
+        self.assertEqual(len(newfile.read()), newfile.len)
+
+    def test_read_after(self):
+        self.assertEqual(len(self.f.read_after()),256-(self.f.len%256))
+        # Test corrupted bytes after last sector entry
+        oddafter=self.make_dirfile('ODDAFTER', self.error_sector, self.error_sector, 0)
+        self.assertEqual(
+          (len(oddafter.read_after())+oddafter.len+1)%sectorlen, 0
+        )
+        self.assertEqual(oddafter.read_after()[0],0xff)
+        self.assertEqual(oddafter.read_after()[-2],0xff)
+        self.assertEqual(oddafter.read_after()[-1],0)
+
+    def test_fit_file(self):
+        def get_s(s):
+            l_got_s.append(s)
+            return [0]*sectorlen
+
+        def set_s(s,v):
+            l_set_s.append(s)
+
+        # Test grown file within sector
+        grown=self.make_dirfile(
+          'GROWING',
+          self.error_sector, self.error_sector, 0
+        )
+        grown.fit_file()
+        self.assertEqual(len(grown.read_after())+grown.len, sectorlen)
+        self.assertEqual(grown.read_after()[0],0x88)
+        self.assertEqual(grown.read_after()[-1],0x88)
+        # Test shrunken file within sector
+        shrunk=self.make_dirfile(
+          'SHRINKING',
+          self.error_sector, self.error_sector, 0
+        )
+        shrunk.fit_file()
+        self.assertEqual(len(shrunk.read_after())%sectorlen+shrunk.len, sectorlen)
+        self.assertEqual(shrunk.read_after()[0],0x00)
+        self.assertEqual(shrunk.read_after()[-1],0x99)
+        # Test file grown to multiple new sectors
+        l_got_s=[]
+        l_set_s=[]
+        growmulti=self.make_dirfile('GROWMULTIPLE', get_s, set_s, 0)
+        growmulti.fit_file()
+        self.assertEqual(l_got_s, [4, 5])
+        self.assertEqual(l_set_s, [4, 5])
+        # Test file shrunk from multiple sectors
+        l_set_s=[]
+        shrinkmulti=self.make_dirfile(
+          'SHRINKMULTIPLE'
+          self.error_sector, set_s, 0
+        )
+        shrinkmulti.fit_file()
+        self.assertEqual(l_set_s, [4, 5])
+        # Test file was aligned with sectorlen, has grown
+        l_got_s=[]
+        l_set_s=[]
+        gfromalign=self.make_dirfile('GFROMALIGNED', get_s , set_s, 0)
+        gfromalign.fit_file()
+        self.assertEqual(l_got_s,[11,12])
+        self.assertEqual(l_set_s, [11,12])
+        self.assertEqual(len(gfromalign.read_after()),sectorlen-8)
+        # Test file was aligned with sectorlen, has shrunk
+        l_set_s=[]
+        sfromalign=self.make_dirfile(
+          'SFROMALIGNED',
+          self.error_sector, set_s, 0
+        )
+        sfromalign.fit_file()
+        self.assertEqual(l_set_s, [4, 5])
+        # Test file was not aligned, has grown to be aligned
+        l_got_s=[]
+        l_set_s=[]
+        growalign=self.make_dirfile('GROWALIGNED', get_s, set_s, 0)
+        growalign.fit_file()
+        self.assertEqual(l_got_s, [4,5])
+        self.assertEqual(l_set_s, [4,5])
+        self.assertEqual(len(growalign.read_after()),0)
+        # Test file was not aligned, has shrunk to be aligned
+        l_set_s=[]
+        shrinkalign=self.make_dirfile(
+          'SHRINKALIGNED',
+          self.error_sector, set_s, 0
+        )
+        shrinkalign.fit_file()
+        self.assertEqual(l_set_s,[4,5])
+        # Test file has grown into existing file - conflicting!
+        def get_conflict(s):
+            l_got_s.append(s)
+            if s==5:
+                return None
+            else:
+                return [0]*sectorlen
+
+        l_got_s=[]
+        l_set_s=[]
+        growmulti=self.make_dirfile('GROWMULTIPLE', get_conflict, set_s, 0)
+        growmulti.fit_file()
+        self.assertEqual(l_got_s,[4,5])
+        self.assertEqual(l_set_s,[3])
 
 class DirDisc(DfsDisc):
     def __init__(self, directory, verbose):
@@ -523,45 +850,182 @@ class DirDisc(DfsDisc):
 
         def Sec(value): self.sectors=parse.hex2int(value)
         def Size(value): self.ssd_size=parse.str2int(value)
-        def Noop(value): pass #TODO
+        def Noop(value): pass
         parse.file(
           {'Sectors':Sec, 'SSD file size':Size, 'Catalogue len':Noop},
           '..THIS_DISK.inf2'
         )
 
+        # Parse the non-hidden files
+        def get_sector(s): return self.read_unused_sector(s)
+        def set_sector(s,v): self.set_unused_sector(s, v)
+
         cat=[]
         for filename in os.listdir(self.dir):
             if len(filename)!=0:
                 if filename[0] != '.':
-                    f=DirFile(self.dir, filename, self.verbose)
+                    f=DirFile(
+                      self.dir, filename, get_sector, set_sector, self.verbose
+                    )
                     cat.append(f)
+
+        # Identify unused catnums, and duplicate ones
+        free_nums=[]
+        for catnum in range(len(self.cat)):
+            f=[dirfil for dirfil in self.cat if dirfil.catnum==catnum]
+            if len(f)>1:
+                for fil in f[1:]:
+                    if self.verbose:
+                        print('Info: File {} shares its catnum with {}'.format(
+                          fil.filename, f[0].filename
+                        ),'(catnum={}); renumbering it'.format(
+                          fil.catnum
+                        ))
+                    fil.catnum=None
+            elif len(f)==0:
+                free_nums.append(catnum)
+                if self.verbose>=2:
+                    print('Info: Allocating catnum {} to a file'.format(catnum))
+            # else len(f)==1
+
+        # Assign unused catnums to unnumbered files
+        for f in [dirfil for dirfil in self.cat if dirfil.catnum==None]:
+            f.catnum=free_nums.pop(0)
+
+        assert len(free_nums)==0
+
+        self.cat=sorted(cat, key=lambda fil:fil.catnum)
+
+        # Read ..Empty.inf
+        self.sector_data = dict()
+        self.unused_cat = [None, None]
+
+        def ParseSector(sectornum, value):
+            message='Warning: Unused bytes for sector {:03x}'.format(
+              sectornum
+            )
+            return parse.text2bin(value, message)
+
+        def SaveSector(sectornum, data):
+            if self.verbose:
+                message='Warning: Unused bytes for sector {:03x}'.format(
+                  sectornum
+                )
+            if len(data) > sectorlen:
+                if self.verbose:
+                    print(message, 'too long; truncating')
+                data=data[0:sectorlen]
+            elif len(data) < sectorlen:
+                if self.verbose:
+                    print(message, 'too short; padding with zeroes')
+                data=data+[0]*(sectorlen-len(self.sector_data[sectornum]))
+            self.sector_data[sectornum]=data
+
+
+        def Sector0(value): self.unused_cat[0]=ParseSector(0,value)
+        def Sector1(value): self.unused_cat[1]=ParseSector(1,value)
+        def Additional(value): self.additional=parse.text2bin(
+          value, 'Warning: After disc image'
+        )
 
         with open(os.path.join(self.dir, '..Empty.inf'),'r') as f:
             for line in f.readlines():
                 if line.startswith('Sector '):
-                    sector=int('0x'+line[len('Sector '):])
-                    pass # TODO
+                    (parm, value)=line.split(':')
+                    sector=int(parm[len('Sector '):])
+                    SaveSector(sector,ParseSector(sector, value.strip()))
                 else:
                     parse.line(
                       line,
-                      {'After sector 000': Noop, 'After sector 001': Noop},
-                      '..Empty.inf'
+                      {
+                        'After sector 000': Sector0,
+                        'After sector 001': Sector1,
+                        'After disc image': Additional
+                      }, '..Empty.inf'
                     )
 
+        # Record used sectors and check for conflicts
+        for fil in self.cat:
+            fil.fit_file()
+
+        # Iterate over conflicting files, biggest first
+        for fil in sorted(
+          [f for f in self.cat if f.is_conflicting()], key=lambda f:f.len,
+          reverse=True
+        ):
+            size=-(-fil.len//sectorlen)
+            moved=False
+            for s in range(self.sectors):
+                space=True
+                for se in range(s, s+size):
+                    if self.read_unused_sector(se) == None:
+                        # Sector is in use
+                        space=False
+                        break
+                if space:
+                    fil.move(s)
+                    moved=True
+                    break
+            if not moved:
+                pass # TODO
+
     def read(self, start_sector, length):
-        pass
+        d=[]
+        for s in range(start_sector, start_sector-(-length//sectorlen)):
+            d+=self.read_sector(s)
+        return d[:length]
 
     def list_unused_sectors(self):
-        pass
+        return self.sector_data.keys()
 
     def read_sector(self, sector):
-        pass
+        if sector<=1:
+            title='{:12s}'.format(self.title)
+            if sector==0:
+                sectordata=[ord(c) for c in title[0:8]]
+                for f in self.cat:
+                    sectordata+=f.get_cat_data()
+                sectordata+=self.read_unused_catalogue()[0]
+            elif sector==1:
+                sectordata=[ord(c) for c in title[9:]] # Bytes 0-3
+                sectordata+=self.serial_no # Byte 4
+                sectordata+=len(self.cat)<<3 # Byte 5
+                sectordata+=(self.sectors >> 8) & 0x07 + (
+                  self.boot_options << 4
+                ) # Byte 6
+                sectordata+=self.sectors & 0xff # Byte 7
+                sectordata+=self.read_unused_catalogue()[1]
+            else:
+                raise RuntimeError('Negative sector asked for!')
+        else:
+            sectordata=self.read_unused_sector(sector)
+            if sectordata==None:
+                # Take the closest sector start to identify which file we're in
+                f=[fil for fil in self.cat if fil.start_sector<sector]
+                f=sorted(f,key=lambda fil:fil.start_sector)[-1]
+                # Read the data and split it
+                ss=(sector-f.start_sector)*sectorlen
+                sectordata=(f.read()+f.read_after())[ss:ss+sectorlen]
+        assert len(sectordata) == sectorlen
+        return sectordata
 
-    def read_additional(self):
-        pass
+    def read_unused_sector(self, sector):
+        if sector in self.sector_data.keys():
+            return self.sector_data[sector]
+        else:
+            return None
+
+    def set_unused_sector(self, sector, data):
+        if data == None:
+            # Sector is now used, contrary to the name of this function
+            try:
+                del self.sector_data[sector]
+            except KeyError:
+                pass # Sector already used
+        self.sector_data[sector]=data
 
     def read_unused_catalogue(self):
-        pass
+        return self.unused_cat
 
 class TestDirDisc(unittest.TestCase):
     def setUp(self):
