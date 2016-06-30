@@ -353,13 +353,13 @@ class SsdDisc(DfsDisc):
                     else:
                         r+='0x{:03x} '.format(s)
                 if self.sectors > self.ssd_size//sectorlen:
+                    # More sectors declared than are in the file
                     r+='\nSector'
-                    if self.ssd_size//sectorlen+1 >= self.sectors:
-                        r+=' 0x{:03x} cropped'.format(self.sectors)
+                    if self.ssd_size//sectorlen == self.sectors-1:
+                        r+=' 0x{:03x} cropped'.format(self.sectors-1)
                     else:
                         r+='s 0x{:03x}-0x{:03x} cropped'.format(
-                          -(-self.ssd_size//sectorlen),
-                          self.sectors
+                          self.ssd_size//sectorlen, self.sectors-1
                         )
                 r+='\n'
         if verbose>2:
@@ -458,6 +458,16 @@ class ParseUtils(object):
             for l in handle.readlines():
                 self.line(l.rstrip('\n'), keys, filename)
 
+class DirFileFailure(RuntimeError):
+    pass
+
+class DirFileConflict(Exception):
+    '''
+    Raised to indicate a file conflicts with something else on disc,
+    given where it's trying to be registered to.
+    '''
+    pass
+
 class DirFile(DfsFile):
     def __init__(self, directory, filename, get_sector, set_sector, verbose):
         super(DirFile, self).__init__()
@@ -467,6 +477,7 @@ class DirFile(DfsFile):
         self.after=[]
         self.get_sector=get_sector
         self.set_sector=set_sector
+        self.registered=True
         self.parse_file()
 
     def parse_file(self):
@@ -476,7 +487,6 @@ class DirFile(DfsFile):
             handle.seek(0,2)
             self.len=handle.tell()
         self.after=[0]*(sectorlen-(self.len-1)%sectorlen-1)
-        self.conflicting=True
         # Parse inf files
         inf_filename=os.path.join(self.dir,'.'+self.filename+'.inf')
         if os.path.isfile(inf_filename):
@@ -530,93 +540,16 @@ class DirFile(DfsFile):
               'Catalogue index':Index, 'After':After
               }, '.'+self.filename+'.inf2'
             )
-            self.conflicting=False # Reset flag
 
     def fit_file(self):
+        if self.registered:
+            self.unregister()
+
         with open(os.path.join(self.dir, self.filename),'r') as handle:
             handle.seek(0,2)
-            length=handle.tell()
+            self.len=handle.tell()
 
-        orig_last_sector=self.start_sector+(self.len-1)//sectorlen
-        diff_len=False
-        if length!=self.len:
-            if self.verbose:
-                print('Info: File {} length has changed;'.format(
-                  self.filename
-                ),
-                  'is {} bytes was {} bytes'.format(
-                     length, self.len
-                  )
-                )
-            self.len=length
-            diff_len=True
-        last_sector=self.start_sector+(self.len-1)//sectorlen
-
-        if not self.conflicting:
-            if last_sector > orig_last_sector:
-                # Check sectors for conflicts
-                for s in range(orig_last_sector+1,last_sector):
-                    if self.get_sector(s) == None:
-                        self.conflicting=True
-                        break
-                if not self.conflicting:
-                    last_sector_data=self.get_sector(last_sector)
-                    if last_sector_data != None:
-                        # File fits; calculate after based on existing data
-                        self.after=last_sector_data[(self.len-1)%sectorlen+1:]
-                    else:
-                        self.conflicting=True
-                if self.conflicting:
-                    # Mark previously full sectors as empty
-                    for s in range(self.start_sector, orig_last_sector):
-                        self.set_sector(s,[0]*256)
-                    # Store self.after in old location
-                    self.set_sector(
-                      orig_last_sector,
-                      [0]*(sectorlen-len(self.after))+self.after
-                    )
-                    if self.verbose>=2:
-                        print('Info: File {} has grown beyond allotted'.format(
-                          self.filename
-                        ), 'space; will be moved')
-                else:
-                    # Claim expanded sectors as used
-                    for s in range(orig_last_sector+1, last_sector+1):
-                        self.set_sector(s, None)
-                    if self.verbose>=2:
-                        print('Info: File {} has grown to take {} extra'.format(
-                          self.filename, last_sector-orig_last_sector
-                        ), 'disc sectors, but it fits')
-            elif last_sector < orig_last_sector:
-                for s in range(last_sector+1,orig_last_sector):
-                    self.set_sector(s,[0]*sectorlen)
-                self.set_sector(
-                  orig_last_sector,
-                  [0]*(sectorlen-len(self.after))+self.after
-                )
-                if self.verbose>=2:
-                    print('Info: File {} has shrunk, freeing up {}'.format(
-                      self.filename, orig_last_sector, last_sector
-                    ), 'sectors')
-                self.after=[0]*(sectorlen-(self.len-1)%sectorlen-1)
-            else:
-                # Still ends in same sector
-                last_sector_len=(self.len-1)%sectorlen+1+len(self.after)
-                if last_sector_len != sectorlen:
-                    # File len has changed; self.after needs tweaking
-                    if self.verbose and not diff_len:
-                        print("Warning: 'Bytes after' record corrupted",
-                          "for {}".format(self.filename)
-                        )
-                    elif self.verbose>=2:
-                        print('Info: File {} length changed, but still'.format(
-                          self.filename
-                        ), 'fits in the same allocated sectors')
-
-                if last_sector_len>sectorlen:
-                    self.after=self.after[last_sector_len-sectorlen:]
-                else:
-                    self.after=[0]*(sectorlen-last_sector_len)+self.after
+        self.register()
 
     def read(self):
         with open(os.path.join(self.dir,self.filename),'r') as handle:
@@ -658,17 +591,60 @@ class DirFile(DfsFile):
         return block
 
     def is_conflicting(self):
-        return self.conflicting
+        '''
+        After calling fit_file() this will report whether the file ran into
+        another file on the disc, or if it fitted into the available sectors
+
+        Returns:
+        - True if it conflicts with another file.
+        - False if it fits
+        '''
+        return not self.registered
+
+    def unregister(self):
+        if self.registered:
+            lastsector=self.start_sector-self.len//-sectorlen-1
+            for s in range(self.start_sector, lastsector):
+                self.set_sector(s,[0]*sectorlen)
+            last_len=sectorlen-len(self.after)
+            self.set_sector(lastsector, [0]*last_len+self.after)
+            self.registered=False
+        else:
+            raise DirFileFailure(
+              'Trying to unregister an already unregistered file'
+            )
+
+    def register(self):
+        if not self.registered:
+            last_sector=self.start_sector-self.len//-sectorlen-1
+            # Check for conflicts
+            for s in range(self.start_sector, last_sector+1):
+                if self.get_sector(s) == None:
+                    raise DirFileConflict(
+                        'File {}.{}, Sector {}'.format(
+                            self.dir, self.filename, s
+                        )
+                    )
+            # Register file
+            for s in range(self.start_sector, last_sector):
+                self.set_sector(s, None)
+            self.after=self.get_sector(last_sector)[(self.len-1)%sectorlen+1:]
+            self.set_sector(last_sector, None)
+            self.registered=True
+        else:
+            raise DirFileFailure(
+                'File {}.{}: '.format(self.dir,self.filename)+
+                'Trying to register an already registered file'
+            )
 
     def move(self, new_start_sector):
-        self.start_sector=new_start_sector
-        lastsector=new_start_sector+self.len//sectorlen
+        if self.registered:
+            self.unregister()
         try:
-            for s in range(new_start_sector, lastsector):
-                self.get_sector(s)[0]
-            self.after=self.get_sector(lastsector)[(self.len-1)%sectorlen+1:]
-        except TypeError:
-            raise RuntimeError('Trying to move to occupied space!')
+            self.start_sector=new_start_sector
+            self.register()
+        except DirFileConflict as e:
+            raise DirFileFailure('Trying to move to occupied space!',e)
 
 class TestDirFile(unittest.TestCase):
     def setUp(self):
@@ -719,7 +695,7 @@ class TestDirFile(unittest.TestCase):
         self.assertEqual(self.f.catnum, 0)
         newfile=self.make_dirfile('NEWFILE', self.get_s, self.set_s, 0)
         self.assertEqual(newfile.catnum,None)
-        growaligned=self.make_dirfile('GROWALIGNED', self.get_s, self.set_s, 0)
+        growaligned=self.make_dirfile('ALIGNED', self.get_s, self.set_s, 0)
         self.assertEqual(growaligned.catnum, 2)
 
     def test_read(self):
@@ -738,93 +714,69 @@ class TestDirFile(unittest.TestCase):
         self.assertEqual(oddafter.read_after()[-2],0xff)
         self.assertEqual(oddafter.read_after()[-1],0)
 
-    def test_fit_file(self):
+    def test_unregister(self):
+        def set_s(s,v):
+            if v==None:
+                l_set_none.append(s)
+            elif v==[0]*sectorlen:
+                l_set_empty.append(s)
+            else:
+                self.assertEqual(len(v), sectorlen)
+
+        l_set_none=[]
+        l_set_empty=[]
+        aligned=self.make_dirfile('ALIGNED', self.error_sector, set_s, 0)
+        self.assertTrue(aligned.registered)
+        aligned.unregister()
+        self.assertEqual(l_set_none,[])
+        self.assertEqual(l_set_empty,[3,4,5])
+        self.assertFalse(aligned.registered)
+
+        l_set_none=[]
+        l_set_empty=[]
+        unaligned=self.make_dirfile('UNALIGNED', self.error_sector, set_s, 0)
+        self.assertTrue(unaligned.registered)
+        unaligned.unregister()
+        self.assertEqual(l_set_none,[])
+        self.assertEqual(l_set_empty,[3,4])
+        self.assertFalse(unaligned.registered)
+
+        self.assertRaises(DirFileFailure, unaligned.unregister)
+
+    def test_register(self):
         def get_s(s):
             l_got_s.append(s)
             return [0]*sectorlen
 
         def set_s(s,v):
-            l_set_s.append(s)
-
-        # Test grown file within sector
-        grown=self.make_dirfile(
-          'GROWING',
-          self.error_sector, self.error_sector, 0
-        )
-        grown.fit_file()
-        self.assertEqual(len(grown.read_after())+grown.len, sectorlen)
-        self.assertEqual(grown.read_after()[0],0x88)
-        self.assertEqual(grown.read_after()[-1],0x88)
-        # Test shrunken file within sector
-        shrunk=self.make_dirfile(
-          'SHRINKING',
-          self.error_sector, self.error_sector, 0
-        )
-        shrunk.fit_file()
-        self.assertEqual(len(shrunk.read_after())%sectorlen+shrunk.len, sectorlen)
-        self.assertEqual(shrunk.read_after()[0],0x00)
-        self.assertEqual(shrunk.read_after()[-1],0x99)
-        # Test file grown to multiple new sectors
-        l_got_s=[]
-        l_set_s=[]
-        growmulti=self.make_dirfile('GROWMULTIPLE', get_s, set_s, 0)
-        growmulti.fit_file()
-        self.assertEqual(l_got_s, [4, 5])
-        self.assertEqual(l_set_s, [4, 5])
-        # Test file shrunk from multiple sectors
-        l_set_s=[]
-        shrinkmulti=self.make_dirfile(
-          'SHRINKMULTIPLE'
-          self.error_sector, set_s, 0
-        )
-        shrinkmulti.fit_file()
-        self.assertEqual(l_set_s, [4, 5])
-        # Test file was aligned with sectorlen, has grown
-        l_got_s=[]
-        l_set_s=[]
-        gfromalign=self.make_dirfile('GFROMALIGNED', get_s , set_s, 0)
-        gfromalign.fit_file()
-        self.assertEqual(l_got_s,[11,12])
-        self.assertEqual(l_set_s, [11,12])
-        self.assertEqual(len(gfromalign.read_after()),sectorlen-8)
-        # Test file was aligned with sectorlen, has shrunk
-        l_set_s=[]
-        sfromalign=self.make_dirfile(
-          'SFROMALIGNED',
-          self.error_sector, set_s, 0
-        )
-        sfromalign.fit_file()
-        self.assertEqual(l_set_s, [4, 5])
-        # Test file was not aligned, has grown to be aligned
-        l_got_s=[]
-        l_set_s=[]
-        growalign=self.make_dirfile('GROWALIGNED', get_s, set_s, 0)
-        growalign.fit_file()
-        self.assertEqual(l_got_s, [4,5])
-        self.assertEqual(l_set_s, [4,5])
-        self.assertEqual(len(growalign.read_after()),0)
-        # Test file was not aligned, has shrunk to be aligned
-        l_set_s=[]
-        shrinkalign=self.make_dirfile(
-          'SHRINKALIGNED',
-          self.error_sector, set_s, 0
-        )
-        shrinkalign.fit_file()
-        self.assertEqual(l_set_s,[4,5])
-        # Test file has grown into existing file - conflicting!
-        def get_conflict(s):
-            l_got_s.append(s)
-            if s==5:
-                return None
+            if v==None:
+                l_set_none.append(s)
             else:
-                return [0]*sectorlen
+                self.assertTrue(False, 'Told to set sector {} with {}'.format(s,v))
+        l_got_s=[]
+        l_set_none=[]
+        aligned=self.make_dirfile('ALIGNED', get_s, set_s, 0)
+        aligned.registered=False
+        aligned.register()
+        self.assertEqual(l_set_none,[3,4,5])
+        self.assertEqual(l_got_s, [3,4,5,5])
+        self.assertEqual(len(aligned.read_after()),0)
+        self.assertTrue(aligned.registered)
 
         l_got_s=[]
-        l_set_s=[]
-        growmulti=self.make_dirfile('GROWMULTIPLE', get_conflict, set_s, 0)
-        growmulti.fit_file()
-        self.assertEqual(l_got_s,[4,5])
-        self.assertEqual(l_set_s,[3])
+        l_set_none=[]
+        unaligned=self.make_dirfile('UNALIGNED', get_s, set_s, 0)
+        unaligned.registered=False
+        unaligned.register()
+        self.assertEqual(l_set_none,[3,4,5])
+        self.assertEqual(l_got_s, [3,4,5,5])
+        self.assertEqual(len(unaligned.read_after()),sectorlen-8)
+        self.assertTrue(unaligned.registered)
+
+        self.assertRaises(DirFileFailure, unaligned.register)
+
+    def test_fit_file(self):
+        pass # TODO
 
 class DirDisc(DfsDisc):
     def __init__(self, directory, verbose):
@@ -932,7 +884,7 @@ class DirDisc(DfsDisc):
             for line in f.readlines():
                 if line.startswith('Sector '):
                     (parm, value)=line.split(':')
-                    sector=int(parm[len('Sector '):])
+                    sector=parse.hex2int(parm[len('Sector '):])
                     SaveSector(sector,ParseSector(sector, value.strip()))
                 else:
                     parse.line(
@@ -944,34 +896,149 @@ class DirDisc(DfsDisc):
                       }, '..Empty.inf'
                     )
 
+    def fit_files(self):
+        # Check empty sectors are defined
+        sec=2
+        while sec<self.sectors:
+            fil=[f for f in self.cat if f.start_sector==sec]
+            if len(fil)==0:
+                if sec not in self.sector_data.keys():
+                    if sec*sectorlen>self.ssd_size:
+                        m='assuming empty'
+                        self.sector_data[sec]=[]
+                    else:
+                        m='assuming blank'
+                        self.sector_data[sec]=[0]*sectorlen
+                    if self.verbose>=2:
+                        print(
+                          'Warning: No data for sector {:03x};'.format(sec), m
+                        )
+                sec+=1
+            else:
+                if len(fil)>1:
+                    if self.verbose>1:
+                        print('Warning: Files all start on sector',
+                          '{:03x}:'.format(sec),
+                          ', '.join( [f.dir+'.'+f.filename for f in fil] )
+                        )
+                    for f in fil[1:]:
+                        f.registered=False
+                else:
+                    sec-=fil[0].len//-sectorlen
+
         # Record used sectors and check for conflicts
         for fil in self.cat:
             fil.fit_file()
 
         # Iterate over conflicting files, biggest first
+        enotc=None # Expand rather than Compact if true # TODO Move to self.enotc for testing purposes?
+        have_compacted=False # Offer the user the option of compacting
+        was_cropped=False # Record if after expanding, we need to re-crop
         for fil in sorted(
           [f for f in self.cat if f.is_conflicting()], key=lambda f:f.len,
           reverse=True
         ):
-            size=-(-fil.len//sectorlen)
+            size=-fil.len//-sectorlen
             moved=False
-            for s in range(self.sectors):
+            offend=False # Run into end of a cropped disc
+            # Try to find a place for this file
+            for s in range(2, self.sectors-size):
                 space=True
+                # Check for space at this position
                 for se in range(s, s+size):
-                    if self.read_unused_sector(se) == None:
+                    d=self.read_unused_sector(se)
+                    if d == None:
                         # Sector is in use
                         space=False
-                        break
+                        break # Stop check for space
+                    elif d == '':
+                        # Sector is off the end of a truncated files
+                        offend=True
+                        space=False
+                        break # Stop check for space
                 if space:
                     fil.move(s)
                     moved=True
-                    break
+                    break # Stop try to find a place
+                if offend:
+                    break # Stop try to find a place
             if not moved:
-                pass # TODO
+                # File doesn't fit
+                if have_compacted and self.sectors==800 and not offend:
+                    raise RuntimeError(
+                        'ERROR: Files don\'t even fit on a double density'+
+                        ' disc; aborting'
+                    )
+                if enotc == None:
+                    # Don't know what the user wants
+                    ec=''
+                    if verbose:
+                        while ec != 'c' and ec != 'e':
+                            print(
+                              'Warning: Files do not fit in the allocated',
+                              'space.\nExpand the disc image, or compact',
+                              'it? ',end='')
+                            try:
+                                ec=input(
+                                  '[Ec]'
+                                ).lower()[0]
+                            except IndexError:
+                                ec=''
+                    if ec=='c':
+                        enotc=False
+                    else:
+                        enotc=True
+                assert enotc!=None
+                if enotc == False:
+                    # Compacted last time; still doesn't fit
+                    e=''
+                    if verbose:
+                        while e!='y' and e!='n':
+                            print(
+                              'Warning: Have compacted,',
+                              'but files still don\'t fit\nExpand',
+                              'the disc image? ',end=''
+                            )
+                            try:
+                                e=input('[Yn]').lower()[0]
+                            except IndexError:
+                                e=''
+                    if e=='n':
+                        raise RuntimeError('Can\'t expand disc to fit files')
+                    else:
+                        enotc=True
+
+                if enotc:
+                    # Expand disc
+                    if offend:
+                        was_cropped=True
+                    else:
+                        # Disc full - add sectors
+                        if self.sectors<400:
+                            self.sectors=400
+                        elif self.sectors<800:
+                            self.sectors=800
+                    # Fill in cropped sectors
+                    for s in range(self.sectors):
+                        d=self.read_unused_sector(s)
+                        if d!=None:
+                            # Sector not in use
+                            if len(d)<sectorlen:
+                                d+=[0]*(sectorlen-len(d))
+                                self.set_sector(s,d)
+                else:
+                    # Compact - TODO First empty all used sectors up to needed space
+                    s=2
+                    for f in self.cat:
+                        f.move(s)
+                        s-=f.len//-sectorlen
+                    have_compacted=True
+                    #TODO Need to try to install the file after compacting disc!
+            #TODO Need to return to offer again if image can't be expanded or doesn't fit after compacting
 
     def read(self, start_sector, length):
         d=[]
-        for s in range(start_sector, start_sector-(-length//sectorlen)):
+        for s in range(start_sector, start_sector-(length//-sectorlen)):
             d+=self.read_sector(s)
         return d[:length]
 
