@@ -763,6 +763,22 @@ class TestDirFile(unittest.TestCase):
         self.assertEqual(len(aligned.read_after()),0)
         self.assertTrue(aligned.registered)
 
+        def get_conflicting(s):
+            if s==5:
+                return None
+            else:
+                l_got_s.append(s)
+                return [0]*sectorlen
+
+        l_got_s=[]
+        l_set_none=[]
+        conflicting=self.make_dirfile('ALIGNED', get_conflicting, set_s, 0)
+        conflicting.registered=False
+        self.assertRaises(DirFileConflict, conflicting.register)
+        self.assertEqual(l_set_none,[])
+        self.assertEqual(l_got_s, [3,4])
+        self.assertFalse(conflicting.registered)
+
         l_got_s=[]
         l_set_none=[]
         unaligned=self.make_dirfile('UNALIGNED', get_s, set_s, 0)
@@ -775,8 +791,56 @@ class TestDirFile(unittest.TestCase):
 
         self.assertRaises(DirFileFailure, unaligned.register)
 
+    def test_is_conflicting(self):
+        t=self.make_dirfile('ALIGNED', self.error_sector, self.error_sector, 0)
+        self.assertFalse(t.is_conflicting())
+        t.registered=False
+        self.assertTrue(t.is_conflicting())
+
     def test_fit_file(self):
-        pass # TODO
+        def get_s(s):
+            l_got_s.append(s)
+            return [0]*sectorlen
+
+        def set_s(s,v):
+            if v==None:
+                l_set_none.append(s)
+            elif v==[0]*sectorlen:
+                l_set_empty.append(s)
+            else:
+                l_set_after.append(s)
+
+        l_got_s=[]
+        l_set_none=[]
+        l_set_empty=[]
+        l_set_after=[]
+        unaligned=self.make_dirfile('UNALIGNED', get_s, set_s, 0)
+        unaligned.fit_file()
+        self.assertEqual(l_set_none,[3,4,5])
+        self.assertEqual(l_got_s, [3,4,5,5])
+        self.assertEqual(l_set_empty,[3,4])
+        self.assertEqual(l_set_after, [5])
+        self.assertFalse(unaligned.is_conflicting())
+
+        def get_conflicting(s):
+            if s==5:
+                return None
+            else:
+                l_got_s.append(s)
+                return [0]*sectorlen
+
+        l_got_s=[]
+        l_set_none=[]
+        l_set_empty=[]
+        l_set_after=[]
+        conflicting=self.make_dirfile('UNALIGNED', get_conflicting, set_s, 0)
+        conflicting.registered=False
+        self.assertRaises(DirFileConflict, conflicting.register)
+        self.assertEqual(l_set_none,[])
+        self.assertEqual(l_set_empty,[])
+        self.assertEqual(l_set_after,[])
+        self.assertEqual(l_got_s, [3,4])
+        self.assertTrue(conflicting.is_conflicting())
 
 class DirDisc(DfsDisc):
     def __init__(self, directory, verbose):
