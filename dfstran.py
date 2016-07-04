@@ -1010,6 +1010,9 @@ class DirDisc(DfsDisc):
                 space=True
                 # Check for space at this position
                 for se in range(s, s+size):
+                    if se >= self.sectors:
+                        space=False
+                        break # Stop check for space
                     d=self.read_unused_sector(se)
                     if d == None:
                         # Sector is in use
@@ -1026,14 +1029,32 @@ class DirDisc(DfsDisc):
                     break # Stop try to find a place
                 if offend:
                     break # Stop try to find a place
-            if not moved:
+            while not moved:
                 # File doesn't fit
                 if have_compacted and self.sectors==800 and not offend:
                     raise RuntimeError(
                         'ERROR: Files don\'t even fit on a double density'+
                         ' disc; aborting'
                     )
-                if enotc == None:
+                if enotc == False:
+                    # Compacted last time; still doesn't fit
+                    e=''
+                    if verbose:
+                        while e!='y' and e!='n':
+                            print(
+                              'Warning: Have compacted,',
+                              'but files still don\'t fit\nExpand',
+                              'the disc image? ',end=''
+                            )
+                            try:
+                                e=input('[Yn]').lower()[0]
+                            except IndexError:
+                                e=''
+                    if e=='n':
+                        raise RuntimeError('Can\'t expand disc to fit files')
+                    else:
+                        enotc=True
+                elif enotc == None:
                     # Don't know what the user wants
                     ec=''
                     if verbose:
@@ -1053,24 +1074,6 @@ class DirDisc(DfsDisc):
                     else:
                         enotc=True
                 assert enotc!=None
-                if enotc == False:
-                    # Compacted last time; still doesn't fit
-                    e=''
-                    if verbose:
-                        while e!='y' and e!='n':
-                            print(
-                              'Warning: Have compacted,',
-                              'but files still don\'t fit\nExpand',
-                              'the disc image? ',end=''
-                            )
-                            try:
-                                e=input('[Yn]').lower()[0]
-                            except IndexError:
-                                e=''
-                    if e=='n':
-                        raise RuntimeError('Can\'t expand disc to fit files')
-                    else:
-                        enotc=True
 
                 if enotc:
                     # Expand disc
@@ -1091,14 +1094,18 @@ class DirDisc(DfsDisc):
                                 d+=[0]*(sectorlen-len(d))
                                 self.set_sector(s,d)
                 else:
-                    # Compact - TODO First empty all used sectors up to needed space
-                    s=2
+                    # Compact
                     for f in self.cat:
-                        f.move(s)
-                        s-=f.len//-sectorlen
+                        f.unregister()
+                    s=2
+                    try:
+                        for f in self.cat:
+                            f.move(s)
+                            s-=f.len//-sectorlen
+                        moved=True
+                    except DirFileFailure:
+                        pass # Not all files fit - 'moved' remains False
                     have_compacted=True
-                    #TODO Need to try to install the file after compacting disc!
-            #TODO Need to return to offer again if image can't be expanded or doesn't fit after compacting
 
     def read(self, start_sector, length):
         d=[]
