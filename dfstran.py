@@ -684,7 +684,7 @@ class TestDirFile(unittest.TestCase):
         self.assertEqual(newfile.exec_address,0x1900)
 
     def test_start_sector(self):
-        self.assertEqual(self.f.start_sector, 0x003)
+        self.assertEqual(self.f.start_sector, 0x002)
         newfile=self.make_dirfile('NEWFILE', self.get_s, self.set_s, 0)
         self.assertEqual(newfile.start_sector,2)
 
@@ -1109,7 +1109,7 @@ class DirDisc(DfsDisc):
 
     def read(self, start_sector, length):
         d=[]
-        for s in range(start_sector, start_sector-(length//-sectorlen)):
+        for s in range(start_sector, start_sector-(length//-sectorlen)+1):
             d+=self.read_sector(s)
         return d[:length]
 
@@ -1134,7 +1134,7 @@ class DirDisc(DfsDisc):
                 sectordata+=self.sectors & 0xff # Byte 7
                 sectordata+=self.read_unused_catalogue()[1]
             else:
-                raise RuntimeError('Negative sector asked for!')
+                raise IndexError('Negative sector asked for!')
         else:
             sectordata=self.read_unused_sector(sector)
             if sectordata==None:
@@ -1165,9 +1165,9 @@ class DirDisc(DfsDisc):
     def read_unused_catalogue(self):
         return self.unused_cat
 
-class TestDirDisc(unittest.TestCase):
+class TestDirDiscData(unittest.TestCase):
     def setUp(self):
-        self.f=DirDisc(os.path.join('test_data','DirTest1'),1)
+        self.f=DirDisc(os.path.join('test_data','DirTest1'),0)
 
     def test_boot_opts(self):
         self.assertEqual(self.f.boot_options, 3)
@@ -1183,6 +1183,34 @@ class TestDirDisc(unittest.TestCase):
 
     def test_ssd_size(self):
         self.assertEqual(self.f.ssd_size, 1280)
+
+class TestDirDiscMethods(unittest.TestCase):
+    def setUp(self):
+        self.unchanged=DirDisc(os.path.join('test_data','DirTest1'),2)
+        self.smallincrease=DirDisc(os.path.join('test_data','DirTest2'),2)
+
+    def test_fit_files(self):
+        self.unchanged.fit_files()
+        self.smallincrease.fit_files()
+        # TODO
+
+    def test_read(self):
+        pass # TODO
+
+    def test_list_unused_sectors(self):
+        pass # TODO
+
+    def test_read_sector(self):
+        pass # TODO
+
+    def test_read_unused_sector(self):
+        pass # TODO
+
+    def test_set_unused_sector(self):
+        pass # TODO
+
+    def test_read_unused_catalogue(self):
+        pass # TODO
 
 if __name__ == '__main__':
     pars=argparse.ArgumentParser(prog='dfstran', description='pack and unpack BBC Micro DFS disc images')
