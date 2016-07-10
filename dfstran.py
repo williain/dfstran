@@ -248,7 +248,7 @@ class SsdDisc(DfsDisc):
 
     def read(self, start_sector, length):
         self.file.seek(start_sector*sectorlen)
-        return self.file.read(length)
+        return self.file.read(length).decode(encoding='Latin1')
 
     def list_unused_sectors(self):
         ordered=sorted(self.cat,key=lambda fil:fil.start_sector)
@@ -425,14 +425,14 @@ class ParseUtils(object):
             return 0
 
     def text2bin(self, value, message):
-        data=[]
+        data=''
         while len(value)>=2:
-            data.append(self.hex2int(value[0:2]))
+            data+=chr(self.hex2int(value[0:2]))
             value=value[2:]
         if len(value)==1:
             if self.verbose:
                 print(message, 'has odd length; wiping last byte')
-            data.append(0)
+            data+='\0'
         return data
 
     def line(self,line,keys,filename):
@@ -471,24 +471,23 @@ class DirFileConflict(Exception):
 class DirFile(DfsFile):
     def __init__(self, directory, filename, get_sector, set_sector, verbose):
         super(DirFile, self).__init__()
-        self.dir=directory
-        self.filename=filename
         self.verbose=verbose
         self.after=[]
         self.get_sector=get_sector
         self.set_sector=set_sector
         self.registered=True
-        self.parse_file()
+        self.parse_file(directory,filename)
 
-    def parse_file(self):
-        parse=ParseUtils(self.dir, self.verbose)
+    def parse_file(self, directory, filename):
+        self.path=os.path.join(directory, filename)
+        parse=ParseUtils(directory, self.verbose)
         # Set default values for new files
-        with open(os.path.join(self.dir,self.filename),'r') as handle:
+        with open(os.path.join(directory,filename),'r') as handle:
             handle.seek(0,2)
             self.len=handle.tell()
         self.after=[0]*(sectorlen-(self.len-1)%sectorlen-1)
         # Parse inf files
-        inf_filename=os.path.join(self.dir,'.'+self.filename+'.inf')
+        inf_filename=os.path.join(directory,'.'+filename+'.inf')
         if os.path.isfile(inf_filename):
             with open(inf_filename,'r') as f:
                 for line in f.readlines():
@@ -496,36 +495,54 @@ class DirFile(DfsFile):
                     i=0
                     for arg in line.split(' '):
                         i+=1
-                        try:
-                            (parm, value)=arg.split(':')
-                            parm=parm.strip()
-                            value=value.strip()
-                            parm=parm.lstrip(', ')
-                            value=value.rstrip(', ')
+                        if i==1:
+                            path=arg
+                            path=path.rstrip(', ')
+                            if path[1]=='.':
+                                self.dir=path[0]
+                                self.filename=path[2:]
+                            else:
+                                self.dir=''
+                                self.filename=path
+                        else:
+                            try:
+                                (parm, value)=arg.split(':')
+                                parm=parm.strip()
+                                value=value.strip()
+                                parm=parm.lstrip(', ')
+                                value=value.rstrip(', ')
 
-                            if parm=='L': self.load_address=parse.hex2int(value)
-                            if parm=='E': self.exec_address=parse.hex2int(value)
-                            if parm=='F': self.loc=(value.strip()=='L')
-                        except ValueError:
-                            if i>1 and self.verbose:
-                                print(
-                                  "Warning: Unrecognised argument",
-                                  "'{}' in {}".format(
-                                    arg,
-                                    '.'+self.filename+'.inf'
-                                  )
-                                )
-                            # if i==1, first arg is allowed to not contain
-                            # a colon, since it's expected to be the filename
+                                if parm=='L': self.load_address=parse.hex2int(value)
+                                elif parm=='E': self.exec_address=parse.hex2int(value)
+                                elif parm=='F': self.loc=(value.strip()=='L')
+                                else:
+                                    if self.verbose:
+                                        print(
+                                          'Warning: Unrecognised parameter',
+                                          "'{}' from {} in {}".format(
+                                              parm, arg, filename
+                                          )
+                                        )
+                            except ValueError:
+                                if self.verbose:
+                                    print(
+                                      "Warning: Unrecognised argument",
+                                      "'{}' in {}".format(
+                                        arg,
+                                        '.'+self.filename+'.inf'
+                                      )
+                                    )
 
         if os.path.isfile(inf_filename+'2'):
             def Start(value): self.start_sector=parse.hex2int(value)
             def Len(value): self.len=parse.str2int(value)
             def Index(value): self.catnum=parse.str2int(value)
             def After(value):
-                self.after=[]
+                self.after=b''
                 while len(value)>=2:
-                    self.after.append(parse.hex2int(value[0:2]))
+                    self.after+=self.__str2bytes(
+                      chr(parse.hex2int(value[:2]))
+                    )
                     value=value[2:]
                 if len(value)==1:
                     if self.verbose:
@@ -533,62 +550,59 @@ class DirFile(DfsFile):
                           self.filename
                         ), 'wiping last byte'
                         )
-                    self.after.append(0)
+                    self.after+=b'\0'
             parse.file(
               {
               'Start sector':Start, 'Length':Len,
               'Catalogue index':Index, 'After':After
-              }, '.'+self.filename+'.inf2'
+              }, '.'+filename+'.inf2'
             )
 
     def fit_file(self):
         if self.registered:
             self.unregister()
 
-        with open(os.path.join(self.dir, self.filename),'r') as handle:
+        with open(self.path,'rb') as handle:
             handle.seek(0,2)
             self.len=handle.tell()
 
         self.register()
 
     def read(self):
-        with open(os.path.join(self.dir,self.filename),'r') as handle:
+        with open(self.path,'rb') as handle:
             return handle.read()
 
     def read_after(self):
-        return list(self.after) # Modifyable copy of self.after
+        return self.after
 
     def get_cat_data(self):
         '''
         Get the 8 bytes of data that go into sector 0 for every file on a disc
         '''
-        block=[' ']*7
+        block='{:<7s}'.format(self.filename)
         dirflag=ord(self.dir[0])
         if self.loc:
             dirflag=dirflag | 0x80
-        block.append(dirflag)
-        return block
+        block+=chr(dirflag)
+        return self.__str2bytes(block)
 
     def get_attrib_data(self):
         '''
         Get the 8 bytes of data that go into sector 1 for every file on a disc
         '''
-        block=[
-          (self.load_address & 0x00ff00) >> 8,
-          self.load_address & 0x0000ff
-        ]
-        block.append((self.exec_address & 0x00ff00) >> 8)
-        block.append(self.exec_address & 0x0000ff)
-        block.append((self.len & 0x00ff00) >> 8)
-        block.append(self.len & 0x0000ff)
-        block.append(
-          ((self.exec_address & 0x030000) >> 10) + # 0b11000000
-          ((self.len & 0x030000) >> 12) +  # 0b001100000
-          ((self.load_address & 0x030000) >> 14) + # 0b00001100
-          ((self.start_sector & 0x0300) >> 8) # 0b00000011
-        )
-        block.append(self.start_sector & 0x0000ff)
-        return block
+        return self.__str2bytes(chr((self.load_address & 0x00ff00) >> 8
+        )+chr(self.load_address & 0x0000ff
+        )+chr((self.exec_address & 0x00ff00) >> 8
+        )+chr(self.exec_address & 0x0000ff
+        )+chr((self.len & 0x00ff00) >> 8
+        )+chr(self.len & 0x0000ff
+        )+chr(
+            ((self.exec_address & 0x030000) >> 10) + # 0b11000000
+            ((self.len & 0x030000) >> 12) +  # 0b001100000
+            ((self.load_address & 0x030000) >> 14) + # 0b00001100
+            ((self.start_sector & 0x0300) >> 8) # 0b00000011
+        )+chr(self.start_sector & 0x0000ff
+        ))
 
     def is_conflicting(self):
         '''
@@ -605,9 +619,9 @@ class DirFile(DfsFile):
         if self.registered:
             lastsector=self.start_sector-self.len//-sectorlen-1
             for s in range(self.start_sector, lastsector):
-                self.set_sector(s,[0]*sectorlen)
+                self.set_sector(s,b'\0'*sectorlen)
             last_len=sectorlen-len(self.after)
-            self.set_sector(lastsector, [0]*last_len+self.after)
+            self.set_sector(lastsector, b'\0'*last_len+self.after)
             self.registered=False
         else:
             raise DirFileFailure(
@@ -646,6 +660,15 @@ class DirFile(DfsFile):
         except DirFileConflict as e:
             raise DirFileFailure('Trying to move to occupied space!',e)
 
+    def __str2bytes(self,str):
+        try:
+            return str.encode('Latin1')
+        except UnicodeDecodeError:
+            # Python2 strings can contain top bit set characters but can't
+            # be encoded since it tries to decode it as 7-bit ascii first
+            # Luckily, in python2 bytes objects are just 8-bit strings, so:
+            return str
+
 class TestDirFile(unittest.TestCase):
     def setUp(self):
         def get_sector(sector): return [0]*sectorlen
@@ -671,7 +694,10 @@ class TestDirFile(unittest.TestCase):
         )
 
     def test_filename(self):
-        self.assertEqual(self.f.filename, '$.FILE1')
+        self.assertEqual(self.f.filename, 'FILE1')
+
+    def test_dir(self):
+        self.assertEqual(self.f.dir, '$')
 
     def test_load_address(self):
         self.assertEqual(self.f.load_address, 0xFF1900)
@@ -707,18 +733,28 @@ class TestDirFile(unittest.TestCase):
         self.assertEqual(len(self.f.read_after()),256-(self.f.len%256))
         # Test corrupted bytes after last sector entry
         oddafter=self.make_dirfile('ODDAFTER', self.error_sector, self.error_sector, 0)
+        oddafter_read=oddafter.read_after()
         self.assertEqual(
-          (len(oddafter.read_after())+oddafter.len+1)%sectorlen, 0
+          (len(oddafter_read)+oddafter.len+1)%sectorlen, 0
         )
-        self.assertEqual(oddafter.read_after()[0],0xff)
-        self.assertEqual(oddafter.read_after()[-2],0xff)
-        self.assertEqual(oddafter.read_after()[-1],0)
+        # Getting ranges because indexes of bytes under python3 gives an int
+        self.assertEqual(oddafter_read[:1],b'\xff')
+        self.assertEqual(oddafter_read[-2:-1],b'\xff')
+        self.assertEqual(oddafter_read[-1:],b'\0')
+
+    def test_get_cat_data(self):
+        self.assertEqual(len(self.f.get_cat_data()),8)
+        self.assertEqual(self.f.get_cat_data()[:7],b'FILE1  ')
+
+    def test_get_attrib_data(self):
+        self.assertEqual(len(self.f.get_attrib_data()),8)
+        self.assertEqual(self.f.get_attrib_data()[:2],b'\x19\x00')
 
     def test_unregister(self):
         def set_s(s,v):
             if v==None:
                 l_set_none.append(s)
-            elif v==[0]*sectorlen:
+            elif v==b'\0'*sectorlen:
                 l_set_empty.append(s)
             else:
                 self.assertEqual(len(v), sectorlen)
@@ -805,7 +841,7 @@ class TestDirFile(unittest.TestCase):
         def set_s(s,v):
             if v==None:
                 l_set_none.append(s)
-            elif v==[0]*sectorlen:
+            elif v==b'\0'*sectorlen:
                 l_set_empty.append(s)
             else:
                 l_set_after.append(s)
@@ -960,7 +996,21 @@ class DirDisc(DfsDisc):
                       }, '..Empty.inf'
                     )
 
-    def fit_files(self):
+    def fit_files(self, enotc=False):
+        '''
+        Check the disc is defined fully and that all files fit in the space
+        provided.  If the latter is untrue, offer to compact the disc or
+        upgrade it to a larger sized disc.
+
+        Arguments:
+        - enotc:
+          True: expand the disc rather than compacting it.  This can be useful
+          if copy protection algorithms on the disc expect hidden data, but is
+          otherwise wasteful.
+          False: compact the disc if files don't fit.  If they still don't fit,
+          expand it, but it's been compacted first.
+          None: Ask the user what they want to do when necessary.
+        '''
         # Check empty sectors are defined
         sec=2
         while sec<self.sectors:
@@ -986,7 +1036,7 @@ class DirDisc(DfsDisc):
                           ', '.join( [f.dir+'.'+f.filename for f in fil] )
                         )
                     for f in fil[1:]:
-                        f.registered=False
+                        f.registered=False # TODO: Need to unregister instead?
                 else:
                     sec-=fil[0].len//-sectorlen
 
@@ -995,7 +1045,6 @@ class DirDisc(DfsDisc):
             fil.fit_file()
 
         # Iterate over conflicting files, biggest first
-        enotc=None # Expand rather than Compact if true # TODO Move to self.enotc for testing purposes?
         have_compacted=False # Offer the user the option of compacting
         was_cropped=False # Record if after expanding, we need to re-crop
         for fil in sorted(
@@ -1108,7 +1157,7 @@ class DirDisc(DfsDisc):
                     have_compacted=True
 
     def read(self, start_sector, length):
-        d=[]
+        d=b''
         for s in range(start_sector, start_sector-(length//-sectorlen)+1):
             d+=self.read_sector(s)
         return d[:length]
@@ -1139,8 +1188,11 @@ class DirDisc(DfsDisc):
             sectordata=self.read_unused_sector(sector)
             if sectordata==None:
                 # Take the closest sector start to identify which file we're in
-                f=[fil for fil in self.cat if fil.start_sector<sector]
-                f=sorted(f,key=lambda fil:fil.start_sector)[-1]
+                f=[fil for fil in self.cat if fil.start_sector<=sector]
+                try:
+                    f=sorted(f,key=lambda fil:fil.start_sector)[-1]
+                except IndexError:
+                    raise ValueError('Missing data fo sector {}'.format(sector))
                 # Read the data and split it
                 ss=(sector-f.start_sector)*sectorlen
                 sectordata=(f.read()+f.read_after())[ss:ss+sectorlen]
@@ -1160,6 +1212,9 @@ class DirDisc(DfsDisc):
                 del self.sector_data[sector]
             except KeyError:
                 pass # Sector already used
+        elif hasattr(data,'encode'):
+            # Data not in raw bytes form; probably a string.
+            data=data
         self.sector_data[sector]=data
 
     def read_unused_catalogue(self):
@@ -1195,6 +1250,8 @@ class TestDirDiscMethods(unittest.TestCase):
         # TODO
 
     def test_read(self):
+        self.smallincrease.fit_files()
+        self.assertEqual(self.smallincrease.read(2,len('passed')),b'passed')
         pass # TODO
 
     def test_list_unused_sectors(self):
